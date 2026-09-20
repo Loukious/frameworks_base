@@ -123,6 +123,8 @@ public final class PlayIntegritySpoofService {
                 parseProp(content);
             }
 
+            deriveFieldsFromFingerprint();
+
             mConfigLoaded = true;
             Log.i(TAG, "PIF config loaded, fields=" + mBuildFields.size()
                 + ", props=" + mSystemProps.size());
@@ -139,6 +141,29 @@ public final class PlayIntegritySpoofService {
         } catch (Throwable e) {
             Log.e(TAG, "Failed to load PIF config", e);
         }
+    }
+
+    /**
+     * Fills ID / INCREMENTAL / TYPE / TAGS / RELEASE from FINGERPRINT when the config
+     * doesn't set them, like PIF's migrate.sh does. Without this DroidGuard sees the
+     * spoofed FINGERPRINT next to the ROM's own Build.ID, INCREMENTAL, TYPE, TAGS and
+     * RELEASE, which is easy to cross-check.
+     * Format: brand/product/device:release/id/incremental:type/tags
+     */
+    private void deriveFieldsFromFingerprint() {
+        String fp = mBuildFields.get("FINGERPRINT");
+        if (fp == null) return;
+        int colon = fp.indexOf(':');
+        if (colon < 0) return;
+        String[] rest = fp.substring(colon + 1).split("/");
+        if (rest.length < 4) return;
+        String[] incrementalAndType = rest[2].split(":");
+        if (incrementalAndType.length != 2) return;
+        mBuildFields.putIfAbsent("RELEASE", rest[0]);
+        mBuildFields.putIfAbsent("ID", rest[1]);
+        mBuildFields.putIfAbsent("INCREMENTAL", incrementalAndType[0]);
+        mBuildFields.putIfAbsent("TYPE", incrementalAndType[1]);
+        mBuildFields.putIfAbsent("TAGS", rest[3]);
     }
 
     private void parseProp(String content) {
@@ -547,6 +572,17 @@ public final class PlayIntegritySpoofService {
 
     public boolean isConfigLoaded() {
         return mConfigLoaded;
+    }
+
+    /**
+     * Whether DroidGuard-facing Build field spoofing (FINGERPRINT, BRAND,
+     * DEVICE, PRODUCT, MANUFACTURER, MODEL, ...) is currently enabled for
+     * this process, independent of whether a config has actually loaded.
+     * Callers that also need config presence should check
+     * {@link #isConfigLoaded()} as well.
+     */
+    public boolean isSpoofBuildEnabled() {
+        return mSpoofBuild && mConfigLoaded;
     }
 
     public byte[] getRomSignatureBytes() {
