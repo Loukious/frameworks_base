@@ -51,6 +51,11 @@ public class TrickyStoreService {
     private final Map<String, Mode> mPackageModes = new ConcurrentHashMap<>();
 
     private volatile Boolean mTeeBroken = null;
+    // A "healthy" result is cached for the process lifetime; a "broken" one is
+    // re-checked after this long, so one transient keystore failure (early boot,
+    // exhausted RKP key pool) doesn't force GENERATE mode until the next reboot.
+    private static final long TEE_RECHECK_COOLDOWN_MS = 5L * 60 * 1000L;
+    private volatile long mTeeCheckedAtMs = 0L;
     private volatile long mLastRevocationCheckMs = 0L;
     private volatile long mLastTargetsRefreshMs = 0L;
     private static final long TARGETS_REFRESH_COOLDOWN_MS = 5_000L;
@@ -60,6 +65,53 @@ public class TrickyStoreService {
         new java.io.File("/data/system/trickystore/revocation_cache.json");
     private volatile CustomPatchLevel mCustomPatchLevel = null;
     private final Map<String, CustomPatchLevel> mPerPackagePatchLevels = new ConcurrentHashMap<>();
+    // Attesting through a hooked process breaks STRONG — always skipped
+    // regardless of what mode the target list has for them, and never
+    // auto-targeted by AxSpoofManager. Shared so the two can't drift apart.
+    public static final java.util.Set<String> XPOSED_PACKAGES = java.util.Set.of(
+            "org.lsposed.manager",
+            "io.github.lsposed.manager",
+            "de.robv.android.xposed.installer",
+            "org.meowcat.edxposed.manager",
+            "com.solohsu.android.edxp.manager",
+            "io.va.exposed",
+            "com.topjohnwu.lsplant.manager",
+            "me.weishu.exposed"
+    );
+    // Default TrickyStore targets, in the same syntax as SPOOF_TRICKYSTORE_TARGET:
+    // "pkg" is AUTO, "pkg?" leaf hack, "pkg!" cert generation, "pkg-" skip.
+    // AxSpoofManager writes this into a target setting that was never set, so a
+    // fresh install attests GMS and friends without anyone opening Evolver, and
+    // Evolver's reset and app picker read the same list rather than keeping a copy.
+    public static final String DEFAULT_TARGET_LIST = String.join("\n",
+            "android",
+            // GMS and friends, AUTO mode
+            "com.android.vending",
+            "com.google.android.gsf",
+            "com.google.android.gms",
+            "com.google.android.contactkeys",
+            "com.google.android.ims",
+            "com.google.android.safetycore",
+            "com.google.android.apps.walletnfcrel",
+            "com.google.android.apps.nbu.paisa.user",
+            // Cert generation
+            "com.revolut.revolut!",
+            // Key attestation checkers, leaf hack
+            "io.github.qwq233.keyattestation?",
+            "io.github.vvb2060.keyattestation?",
+            "io.github.vvb2060.mahoshojo?",
+            "icu.nullptr.nativetest?",
+            "com.reveny.nativecheck?",
+            "com.zhenxi.hunter?",
+            "com.android.nativetest?",
+            "io.liankong.riskdetector?",
+            "luna.safe.luna?",
+            "com.eltavine.duckdetector?",
+            "com.rem01gaming.disclosure?",
+            "wu.keyChain.test?",
+            "com.kikyps.crackme?",
+            "com.chunqiunativecheck?"
+    );
     private volatile String mLastKeyboxFingerprint = null;
 
     private final KeyBoxManager mKeyBoxManager;
@@ -100,15 +152,6 @@ public class TrickyStoreService {
         refreshTargets();
         refreshKeyBox();
         refreshPatchLevel();
-        // Eagerly warm up TEE status in the background so isTeeBroken() never
-        // returns a stale null when the settings UI reads it at startup.
-        new Thread(() -> {
-            try {
-                ensureTeeStatus();
-            } catch (Exception e) {
-                Log.w(TAG, "Background TEE check failed", e);
-            }
-        }, "TrickyStore-TeeInit").start();
         Log.i(TAG, "TrickyStoreService initialized");
     }
 
@@ -393,16 +436,20 @@ public class TrickyStoreService {
         flushPatchSection(null, system, vendor, boot, all);
     }
 
+    private boolean isTeeStatusFresh() {
+        Boolean cached = mTeeBroken;
+        return cached != null && (!cached
+                || System.currentTimeMillis() - mTeeCheckedAtMs < TEE_RECHECK_COOLDOWN_MS);
+    }
+
     private void ensureTeeStatus() {
-        if (mTeeBroken == null) {
-            synchronized (this) {
-                if (mTeeBroken == null) {
-                    mTeeBroken = checkTeeBroken();
-                    if (mTeeBroken) {
-                        AttestationUtils.setTeeBroken(true);
-                    }
-                }
-            }
+        if (isTeeStatusFresh()) return;
+        synchronized (this) {
+            if (isTeeStatusFresh()) return;
+            boolean broken = checkTeeBroken();
+            mTeeBroken = broken;
+            mTeeCheckedAtMs = System.currentTimeMillis();
+            AttestationUtils.setTeeBroken(broken);
         }
     }
 
@@ -574,12 +621,14 @@ public class TrickyStoreService {
     public boolean needHack(int callingUid, String[] packages) {
         if (packages == null) return false;
         maybeRefreshTargets();
-        ensureTeeStatus();
         for (String pkg : packages) {
+            if (XPOSED_PACKAGES.contains(pkg)) continue;
             Mode mode = mPackageModes.get(pkg);
             if (mode == Mode.SKIP) continue;
             if (mode == Mode.LEAF_HACK) return true;
-            if (mode == Mode.AUTO && !mTeeBroken) return true;
+            // Only AUTO needs to know the TEE state. Probing it costs a real
+            // attested key generation, so don't do it for untargeted apps.
+            if (mode == Mode.AUTO && !isTeeBroken()) return true;
         }
         return false;
     }
@@ -587,12 +636,12 @@ public class TrickyStoreService {
     public boolean needGenerate(int callingUid, String[] packages) {
         if (packages == null) return false;
         maybeRefreshTargets();
-        ensureTeeStatus();
         for (String pkg : packages) {
+            if (XPOSED_PACKAGES.contains(pkg)) continue;
             Mode mode = mPackageModes.get(pkg);
             if (mode == Mode.SKIP) continue;
             if (mode == Mode.GENERATE) return true;
-            if (mode == Mode.AUTO && mTeeBroken) return true;
+            if (mode == Mode.AUTO && isTeeBroken()) return true;
         }
         return false;
     }

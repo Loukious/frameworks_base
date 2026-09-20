@@ -159,6 +159,44 @@ public final class PixelDeviceRepository {
                     "tangorpro"
             ));
 
+    // Codenames of 'a' series devices, newest-first. These are prioritized in
+    // device-picker sort order and used to compute a generation-relative
+    // default pick, since 'a' series Play Integrity prints have been observed
+    // to hold a working <A13 PI DEVICE verdict for meaningfully longer than
+    // flagship canary/beta prints, which per community tooling are now largely
+    // STRONG-integrity-only. This is a display/default-selection signal only;
+    // it never filters what fetchFromNetwork() returns.
+    public static final List<String> A_SERIES_ORDER = Collections.unmodifiableList(
+            Arrays.asList(
+                    "formosan", // Pixel 11a
+                    "stallion", // Pixel 10a
+                    "tegu",     // Pixel 9a
+                    "akita",    // Pixel 8a
+                    "lynx",     // Pixel 7a
+                    "bluejay"   // Pixel 6a
+            ));
+
+    /**
+     * Returns the 'a' series codename one generation behind the newest one
+     * present in [available], or the newest available if only one exists.
+     * Returns null if no 'a' series device is present at all.
+     */
+    public static String getPreferredASeriesCodename(List<PixelProfile> available) {
+        Set<String> present = new HashSet<>();
+        for (PixelProfile p : available) present.add(p.codename);
+        int newestIndex = -1;
+        for (int i = 0; i < A_SERIES_ORDER.size(); i++) {
+            if (present.contains(A_SERIES_ORDER.get(i))) { newestIndex = i; break; }
+        }
+        if (newestIndex < 0) return null;
+        int preferredIndex = newestIndex + 1;
+        if (preferredIndex < A_SERIES_ORDER.size()
+                && present.contains(A_SERIES_ORDER.get(preferredIndex))) {
+            return A_SERIES_ORDER.get(preferredIndex);
+        }
+        return A_SERIES_ORDER.get(newestIndex);
+    }
+
     // Shared default spoof target packages — single source of truth used by both
     // PixelPropsUtils (runtime) and PixelPropsSettings (UI), rather than three
     // separately-maintained copies.
@@ -220,14 +258,14 @@ public final class PixelDeviceRepository {
     static {
         List<PixelProfile> f = new ArrayList<>();
         f.add(new PixelProfile("kodiak",    "Pixel 11 Pro XL",   "google", "kodiak",    "kodiak",
-                "google/kodiak/kodiak:17/CD1A.260714.001.A9/15938155:user/release-keys",
-                "CD1A.260714.001.A9", "2026-08-05", 0L, null, false));
+                "google/kodiak/kodiak:17/CD1A.260905.001.B1/16238327:user/release-keys",
+                "CD1A.260905.001.B1", "2026-09-05", 0L, null, false));
         f.add(new PixelProfile("mustang",   "Pixel 10 Pro XL",   "google", "mustang",   "mustang",
-                "google/mustang/mustang:17/CP2A.260805.005/15828068:user/release-keys",
-                "CP2A.260805.005", "2026-08-05", 0L, null, false));
+                "google/mustang/mustang:17/CP3A.260905.009/16091614:user/release-keys",
+                "CP3A.260905.009", "2026-09-05", 0L, null, false));
         f.add(new PixelProfile("tangorpro", "Pixel Tablet",      "google", "tangorpro", "tangorpro",
-                "google/tangorpro/tangorpro:17/CP2A.260705.006/15641320:user/release-keys",
-                "CP2A.260705.005", "2026-07-05", 0L, null, false));
+                "google/tangorpro/tangorpro:17/CP3A.260905.009/16091614:user/release-keys",
+                "CP3A.260905.009", "2026-09-05", 0L, null, false));
         FALLBACK_PROFILES = Collections.unmodifiableList(f);
     }
 
@@ -521,22 +559,38 @@ public final class PixelDeviceRepository {
 
                 // Step 3: extract device codenames from QPR table rows. No known-codename
                 // filter here — an unlisted device (e.g. an unconfirmed Pixel 11 tier) is
-                // still picked up the moment Flash Tool/Google publish it.
-                String qprHtml = readUrl(GOOGLE_URL + bestQprPath);
-                java.util.regex.Matcher rm = rowPattern.matcher(qprHtml);
+                // still picked up the moment Flash Tool/Google publish it. Union device
+                // codenames from both the OTA and Factory Image pages for this QPR rather
+                // than picking one source and discarding the other — Google doesn't always
+                // publish a device to both pages at the same time (e.g. a newer 'a' series
+                // device can lag on one page), so relying on a single source can silently
+                // drop a device for a cycle.
+                String otaHtml = readUrl(GOOGLE_URL + bestQprPath);
+                String fiPath = bestQprPath.replace("/download-ota", "/download");
+                String fiHtml;
+                try {
+                    fiHtml = readUrl(GOOGLE_URL + fiPath);
+                } catch (Exception e) {
+                    fiHtml = ""; // FI page missing/unreachable — fall back to OTA only
+                }
+
                 // codename -> friendly model name straight from the page table,
                 // e.g. "bluejay" -> "Pixel 6a". Preferred over DEVICE_MODEL_MAP
                 // since it's always current; the map is only a fallback for the
-                // rare case a row's name cell is empty.
+                // rare case a row's name cell is empty. OTA is scanned first so
+                // its naming wins on overlap, matching prior behavior.
                 Map<String, String> scrapedModelNames = new HashMap<>();
                 List<String> deviceCodenames = new ArrayList<>();
                 Set<String> seenDevices = new HashSet<>();
-                while (rm.find()) {
-                    String device = rm.group(1).trim();
-                    String modelName = rm.group(2).trim();
-                    if (seenDevices.add(device)) {
-                        deviceCodenames.add(device);
-                        if (!modelName.isEmpty()) {
+                for (String sourceHtml : new String[] { otaHtml, fiHtml }) {
+                    java.util.regex.Matcher rm = rowPattern.matcher(sourceHtml);
+                    while (rm.find()) {
+                        String device = rm.group(1).trim();
+                        String modelName = rm.group(2).trim();
+                        if (seenDevices.add(device)) {
+                            deviceCodenames.add(device);
+                        }
+                        if (!modelName.isEmpty() && !scrapedModelNames.containsKey(device)) {
                             scrapedModelNames.put(device, modelName);
                         }
                     }

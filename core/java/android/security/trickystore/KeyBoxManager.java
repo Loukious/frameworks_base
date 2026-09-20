@@ -44,7 +44,7 @@ import java.util.regex.Pattern;
 public class KeyBoxManager {
     private static final String TAG = "KeyBoxManager";
 
-    private final Map<String, KeyBox> mKeyboxes = new ConcurrentHashMap<>();
+    private volatile Map<String, KeyBox> mKeyboxes = new ConcurrentHashMap<>();
     
     private static final Pattern PEM_HEADER = Pattern.compile("-----BEGIN ([^-]+)-----");
     private static final Pattern XML_COMMENT = Pattern.compile("<!--.*?-->", Pattern.DOTALL);
@@ -74,8 +74,11 @@ public class KeyBoxManager {
     }
 
     public void parseKeybox(String xmlContent) {
-        mKeyboxes.clear();
+        // Parse into a private map and publish it at the end, so a concurrent
+        // attestation never sees a half-filled or empty keybox mid-refresh.
+        Map<String, KeyBox> next = new ConcurrentHashMap<>();
         if (xmlContent == null || xmlContent.isEmpty()) {
+            mKeyboxes = next;
             return;
         }
 
@@ -96,6 +99,10 @@ public class KeyBoxManager {
             boolean inPrivateKey = false;
             boolean inCertificateChain = false;
             boolean inCertificate = false;
+            boolean inNumberOfKeyboxes = false;
+            StringBuilder numberOfKeyboxesBuilder = null;
+            Integer declaredKeyboxCount = null;
+            int parsedKeyCount = 0;
 
             int eventType = parser.getEventType();
             while (eventType != XmlPullParser.END_DOCUMENT) {
@@ -119,6 +126,9 @@ public class KeyBoxManager {
                         } else if ("Certificate".equals(tagName) && inCertificateChain) {
                             inCertificate = true;
                             certBuilder = new StringBuilder();
+                        } else if ("NumberOfKeyboxes".equals(tagName) && !inKey) {
+                            inNumberOfKeyboxes = true;
+                            numberOfKeyboxesBuilder = new StringBuilder();
                         }
                         break;
 
@@ -129,6 +139,8 @@ public class KeyBoxManager {
                                 privateKeyBuilder.append(text);
                             } else if (inCertificate && certBuilder != null) {
                                 certBuilder.append(text);
+                            } else if (inNumberOfKeyboxes && numberOfKeyboxesBuilder != null) {
+                                numberOfKeyboxesBuilder.append(text);
                             }
                         }
                         break;
@@ -154,10 +166,21 @@ public class KeyBoxManager {
                             inCertificate = false;
                         } else if ("CertificateChain".equals(tagName)) {
                             inCertificateChain = false;
+                        } else if ("NumberOfKeyboxes".equals(tagName)) {
+                            if (numberOfKeyboxesBuilder != null) {
+                                try {
+                                    declaredKeyboxCount =
+                                            Integer.parseInt(numberOfKeyboxesBuilder.toString().trim());
+                                } catch (NumberFormatException ignored) {
+                                }
+                                numberOfKeyboxesBuilder = null;
+                            }
+                            inNumberOfKeyboxes = false;
                         } else if ("Key".equals(tagName)) {
                             inKey = false;
                             if (currentAlgorithm != null && privateKeyPem != null && !certificatePems.isEmpty()) {
-                                processKeybox(currentAlgorithm, privateKeyPem, certificatePems);
+                                processKeybox(next, currentAlgorithm, privateKeyPem, certificatePems);
+                                parsedKeyCount++;
                             }
                         }
                         break;
@@ -166,13 +189,26 @@ public class KeyBoxManager {
                 eventType = parser.next();
             }
 
-            Log.i(TAG, "Parsed " + mKeyboxes.size() + " keyboxes");
+            // Guards against a truncated or partially-fetched keybox.xml (network hiccup
+            // mid auto-refresh, or a bad KEYBOX_SOURCE_USER paste) silently taking effect
+            // with fewer keys than the document itself declares it has.
+            if (declaredKeyboxCount != null && declaredKeyboxCount != parsedKeyCount) {
+                Log.e(TAG, "Keybox XML declares " + declaredKeyboxCount + " keybox(es) but only "
+                        + parsedKeyCount + " parsed successfully — rejecting as incomplete");
+                mKeyboxes = new ConcurrentHashMap<>();
+                return;
+            }
+
+            mKeyboxes = next;
+            Log.i(TAG, "Parsed " + next.size() + " keyboxes");
         } catch (Exception e) {
             Log.e(TAG, "Failed to parse keybox XML", e);
+            mKeyboxes = next;
         }
     }
 
-    private void processKeybox(String algorithm, String privateKeyPem, List<String> certificatePems) {
+    private void processKeybox(Map<String, KeyBox> target, String algorithm, String privateKeyPem,
+            List<String> certificatePems) {
         try {
             String normalizedAlgorithm;
             switch (algorithm.toLowerCase()) {
@@ -200,7 +236,7 @@ public class KeyBoxManager {
             if (!certificates.isEmpty()) {
                 PublicKey publicKey = ((X509Certificate) certificates.get(0)).getPublicKey();
                 KeyPair keyPair = new KeyPair(publicKey, privateKey);
-                mKeyboxes.put(normalizedAlgorithm, new KeyBox(keyPair, certificates));
+                target.put(normalizedAlgorithm, new KeyBox(keyPair, certificates));
                 Log.i(TAG, "Added keybox for algorithm: " + normalizedAlgorithm);
             }
         } catch (Exception e) {
