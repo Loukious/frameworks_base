@@ -101,6 +101,10 @@ sealed class AuthMethodBouncerViewModel(
                         tryAutoConfirm = request.useAutoConfirm,
                     )
 
+                if (authenticationResult == AuthenticationResult.HANDOFF_PENDING) {
+                    clearInput()
+                    return@collectLatest
+                }
                 if (
                     authenticationResult == AuthenticationResult.SKIPPED && request.useAutoConfirm
                 ) {
@@ -118,6 +122,7 @@ sealed class AuthMethodBouncerViewModel(
             }
             awaitCancellation()
         } finally {
+            interactor.onSecureSpaceSourcePaused()
             // reset whenever the view model is "deactivated"
             wasSuccessfullyAuthenticated = false
         }

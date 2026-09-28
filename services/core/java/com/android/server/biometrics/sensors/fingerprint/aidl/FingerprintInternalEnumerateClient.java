@@ -18,6 +18,8 @@ package com.android.server.biometrics.sensors.fingerprint.aidl;
 
 import android.annotation.NonNull;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.hardware.biometrics.BiometricsProtoEnums;
 import android.hardware.fingerprint.Fingerprint;
 import android.os.IBinder;
@@ -57,6 +59,14 @@ public class FingerprintInternalEnumerateClient extends InternalEnumerateClient<
         } catch (RemoteException e) {
             Slog.e(TAG, "Remote exception when requesting enumerate", e);
             mCallback.onClientFinished(this, false /* success */);
+        }
+    }
+
+    @Override
+    public void sendDanglingNotification(@NonNull List<String> names) {
+        // Enumeration spans multiple private users; never expose their template names.
+        if (!SecureSpaceFingerprintPool.isSharedUser(getContext(), getTargetUserId())) {
+            super.sendDanglingNotification(names);
         }
     }
 

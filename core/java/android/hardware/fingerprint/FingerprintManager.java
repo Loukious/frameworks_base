@@ -401,6 +401,12 @@ public class FingerprintManager implements BiometricAuthenticator, BiometricFing
          */
         public void onAuthenticationSucceeded(AuthenticationResult result) { }
 
+        /** @hide Trusted keyguard receives an opaque native biometric capability, never a HAT. */
+        public void onSecureSpaceAuthenticationSucceeded(IBinder token, int originUserId,
+                int originSerial, int destinationUserId, int destinationSerial,
+                boolean strongBiometric) {}
+
+
         /**
          * Called when a fingerprint is valid but not recognized.
          */
@@ -1608,6 +1614,14 @@ public class FingerprintManager implements BiometricAuthenticator, BiometricFing
         }
 
         @Override
+        public void onSecureSpaceAuthenticationSucceeded(IBinder token, int originUserId,
+                int originSerial, int destinationUserId, int destinationSerial,
+                boolean strongBiometric) {
+            mExecutor.execute(() -> mFingerprintCallback.sendSecureSpaceAuthenticationSucceeded(
+                    token, originUserId, originSerial, destinationUserId, destinationSerial, strongBiometric));
+        }
+
+        @Override
         public void onFingerprintDetected(int sensorId, int userId, boolean isStrongBiometric) {
             mExecutor.execute(() -> mFingerprintCallback.sendFingerprintDetected(sensorId, userId,
                     isStrongBiometric));
@@ -1648,6 +1662,15 @@ public class FingerprintManager implements BiometricAuthenticator, BiometricFing
         @Override
         public void onUdfpsOverlayShown() {
             mExecutor.execute(mFingerprintCallback::sendUdfpsOverlayShown);
+        }
+    }
+    /** @hide */
+    public boolean hasSecureSpaceRoutingCandidate() {
+        if (mService == null) return false;
+        try {
+            return mService.hasSecureSpaceRoutingCandidate(mContext.getOpPackageName());
+        } catch (RemoteException | RuntimeException error) {
+            return false;
         }
     }
 }

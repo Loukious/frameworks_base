@@ -1112,6 +1112,10 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
 
     private void handleFingerprintError(int msgId, String errString) {
         Assert.isMainThread();
+        final boolean retryConcealedFingerprint =
+                msgId == FingerprintManager.FINGERPRINT_ERROR_CANCELED
+                        && mKeyguardShowing && !mKeyguardGoingAway
+                        && canRouteSecureSpaceFingerprint();
         if (mHandler.hasCallbacks(mFpCancelNotReceived)) {
             mHandler.removeCallbacks(mFpCancelNotReceived);
         }
@@ -1125,6 +1129,11 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
             updateFingerprintListeningState(BIOMETRIC_ACTION_UPDATE);
         } else {
             setFingerprintRunningState(BIOMETRIC_STATE_STOPPED);
+        }
+
+        if (retryConcealedFingerprint) {
+            mHandler.postDelayed(() -> updateFingerprintListeningState(BIOMETRIC_ACTION_UPDATE),
+                    150);
         }
 
         if (msgId == FingerprintManager.FINGERPRINT_ERROR_HW_UNAVAILABLE) {
@@ -1552,11 +1561,16 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
     }
 
     private void updateSecondaryLockscreenRequirement(int userId) {
+        refreshSecondaryLockscreenRequirementForSecureEntry(userId);
+    }
+
+    /** Re-resolves the destination user's administrator policy before a routed dismissal. */
+    boolean refreshSecondaryLockscreenRequirementForSecureEntry(int userId) {
+        Assert.isMainThread();
         Intent oldIntent = mSecondaryLockscreenRequirement.get(userId);
         boolean enabled = mDevicePolicyManager.isSecondaryLockscreenEnabled(UserHandle.of(userId));
-        boolean changed = false;
-
-        if (enabled && (oldIntent == null)) {
+        Intent newIntent = null;
+        if (enabled) {
             ComponentName supervisorComponent =
                     mDevicePolicyManager.getProfileOwnerOrDeviceOwnerSupervisionComponent(
                             UserHandle.of(userId));
@@ -1566,26 +1580,23 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
                 Intent intent =
                         new Intent(DevicePolicyManager.ACTION_BIND_SECONDARY_LOCKSCREEN_SERVICE)
                                 .setPackage(supervisorComponent.getPackageName());
-                ResolveInfo resolveInfo = mPackageManager.resolveService(intent, 0);
+                ResolveInfo resolveInfo = mPackageManager.resolveServiceAsUser(intent, 0, userId);
                 if (resolveInfo != null && resolveInfo.serviceInfo != null) {
-                    Intent launchIntent =
-                            new Intent().setComponent(resolveInfo.serviceInfo.getComponentName());
-                    mSecondaryLockscreenRequirement.put(userId, launchIntent);
-                    changed = true;
+                    newIntent = new Intent().setComponent(resolveInfo.serviceInfo.getComponentName());
                 }
             }
-        } else if (!enabled && (oldIntent != null)) {
-            mSecondaryLockscreenRequirement.put(userId, null);
-            changed = true;
         }
-        if (changed) {
+        ComponentName oldComponent = oldIntent == null ? null : oldIntent.getComponent();
+        ComponentName newComponent = newIntent == null ? null : newIntent.getComponent();
+        if (!java.util.Objects.equals(oldComponent, newComponent)) {
+            mSecondaryLockscreenRequirement.put(userId, newIntent);
             for (int i = 0; i < mCallbacks.size(); i++) {
-                KeyguardUpdateMonitorCallback cb = mCallbacks.get(i).get();
-                if (cb != null) {
-                    cb.onSecondaryLockscreenRequirementChanged(userId);
-                }
+                KeyguardUpdateMonitorCallback callback = mCallbacks.get(i).get();
+                if (callback != null) callback.onSecondaryLockscreenRequirementChanged(userId);
             }
         }
+        // An enabled policy with a missing service cannot authorize routed authentication.
+        return !enabled || newIntent != null;
     }
 
     /**
@@ -1885,6 +1896,109 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
      */
     public void onUdfpsPointerUp(int sensorId) {
         mFingerprintAuthenticationCallback.onUdfpsPointerUp(sensorId);
+    }
+
+    private com.android.systemui.securespaces.SecureSpaceEntryCoordinator mSecureSpaceEntry;
+    private volatile long mFingerprintSourceGeneration;
+    private boolean mSecureSpaceFingerprintCandidate;
+    private boolean mSecureSpaceFingerprintAvailabilityKnown;
+    private boolean mSecureSpaceFingerprintQueryPending;
+    private long mSecureSpaceFingerprintQueryAt;
+
+    private boolean canRouteSecureSpaceFingerprint() {
+        return mSecureSpaceFingerprintCandidate && mSecureSpaceEntry != null
+                && mKeyguardShowing && !mKeyguardGoingAway && !mBiometricPromptShowing
+                && !isFingerprintLockedOut();
+    }
+
+    private void refreshSecureSpaceFingerprintAvailability() {
+        if (mFpm == null || mSecureSpaceEntry == null || mSecureSpaceFingerprintQueryPending) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - mSecureSpaceFingerprintQueryAt < 2_000) return;
+        mSecureSpaceFingerprintQueryAt = now;
+        mSecureSpaceFingerprintQueryPending = true;
+        mBackgroundExecutor.execute(() -> {
+            boolean available = mFpm.hasSecureSpaceRoutingCandidate();
+            mHandler.post(() -> {
+                mSecureSpaceFingerprintQueryPending = false;
+                boolean changed = available != mSecureSpaceFingerprintCandidate;
+                mSecureSpaceFingerprintCandidate = available;
+                boolean wasKnown = mSecureSpaceFingerprintAvailabilityKnown;
+                mSecureSpaceFingerprintAvailabilityKnown = true;
+                if (changed || !wasKnown) {
+                    updateFingerprintListeningState(BIOMETRIC_ACTION_UPDATE);
+                }
+            });
+        });
+    }
+
+    @Inject
+    void setSecureSpaceEntryCoordinator(
+            com.android.systemui.securespaces.SecureSpaceEntryCoordinator coordinator) {
+        mSecureSpaceEntry = coordinator;
+        // Method injection happens after KeyguardUpdateMonitor's initial biometric setup. Do not
+        // leave an ordinary fingerprint client running in that window: it cannot receive the
+        // opaque Secure Space handoff callback. Force an immediate routing-capability refresh and
+        // re-evaluate listening once the answer arrives.
+        mSecureSpaceFingerprintAvailabilityKnown = false;
+        mSecureSpaceFingerprintQueryAt = 0;
+        mHandler.post(() -> updateFingerprintListeningState(BIOMETRIC_ACTION_UPDATE));
+    }
+
+    public boolean isAuthorizedSecureSpaceSwitchTo(int userId) {
+        return mSecureSpaceEntry != null && mSecureSpaceEntry.isAuthorizedSwitchTo(userId);
+    }
+
+    public void reportSecureSpaceFingerprintAccepted(int userId, boolean strong) {
+        Assert.isMainThread();
+        mUserFingerprintAuthenticated.put(userId, new BiometricAuthenticated(true, strong));
+        mTrustManager.unlockedByBiometricForUser(userId, FINGERPRINT);
+        reportSuccessfulBiometricUnlock(strong, userId);
+        // Dismissal and Scene proof delivery are owned by the policy coordinator.
+    }
+
+    private FingerprintManager.AuthenticationCallback fingerprintCallbackForGeneration(long scan) {
+        return new AuthenticationCallback() {
+            private boolean current() { return scan == mFingerprintSourceGeneration; }
+            @Override public void onAuthenticationFailed() {
+                if (current()) mFingerprintAuthenticationCallback.onAuthenticationFailed();
+            }
+            @Override public void onAuthenticationSucceeded(AuthenticationResult result) {
+                if (current()) mFingerprintAuthenticationCallback.onAuthenticationSucceeded(result);
+            }
+            @Override public void onAuthenticationHelp(int id, CharSequence text) {
+                if (current()) mFingerprintAuthenticationCallback.onAuthenticationHelp(id, text);
+            }
+            @Override public void onAuthenticationError(int id, CharSequence text) {
+                // Cancellation errors finish the existing native lifecycle and trigger restart.
+                mFingerprintAuthenticationCallback.onAuthenticationError(id, text);
+            }
+            @Override public void onAuthenticationAcquired(int id) {
+                if (current()) mFingerprintAuthenticationCallback.onAuthenticationAcquired(id);
+            }
+            @Override public void onSecureSpaceAuthenticationSucceeded(android.os.IBinder token,
+                    int origin, int originSerial, int destination, int destinationSerial,
+                    boolean strong) {
+                if (!current() || mSecureSpaceEntry == null || !mKeyguardShowing
+                        || mKeyguardGoingAway) {
+                    mBackgroundExecutor.execute(() ->
+                            mLockPatternUtils.cancelSecureSpaceCredentialHandoff(token));
+                    return;
+                }
+                mFingerprintCancelSignal = null;
+                mHandler.removeCallbacks(mFpCancelNotReceived);
+                mSecureSpaceEntry.acceptFingerprint(token, origin, originSerial, destination,
+                        destinationSerial, strong,
+                        new com.android.systemui.securespaces.SecureSpaceEntryCoordinator.Callback() {
+                            @Override public boolean isActive() {
+                                return current() && mKeyguardShowing && !mKeyguardGoingAway;
+                            }
+                            @Override public void onRejected(
+                                    com.android.internal.widget.SecureSpaceCredentialResponse ignored) {}
+                        });
+                setFingerprintRunningState(BIOMETRIC_STATE_STOPPED);
+            }
+        };
     }
 
     @VisibleForTesting
@@ -2805,6 +2919,7 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
     }
 
     private void updateFingerprintListeningState(int action) {
+        refreshSecureSpaceFingerprintAvailability();
         // If this message exists, we should not authenticate again until this message is
         // consumed by the handler
         if (mHandler.hasMessages(MSG_BIOMETRIC_AUTHENTICATION_CONTINUE)) {
@@ -2821,7 +2936,7 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
         final boolean running = mFingerprintRunningState == BIOMETRIC_STATE_RUNNING;
         final boolean runningOrRestarting = running
                 || mFingerprintRunningState == BIOMETRIC_STATE_CANCELLING_RESTARTING;
-        final boolean runDetect = !isUnlockingWithFingerprintAllowed();
+        final boolean runDetect = !canRouteSecureSpaceFingerprint() && !isUnlockingWithFingerprintAllowed();
 
         if (runningOrRestarting && !shouldListenForFingerprint) {
             if (action == BIOMETRIC_ACTION_START) {
@@ -3145,7 +3260,11 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
 
     @VisibleForTesting
     protected boolean shouldListenForFingerprint(boolean isUdfps) {
+        if (mSecureSpaceEntry != null && !mSecureSpaceFingerprintAvailabilityKnown) return false;
+        if (mSecureSpaceEntry != null && mSecureSpaceEntry.isSwitchInProgress()) return false;
+        if (mSecureSpaceEntry != null && mSecureSpaceEntry.isAwaitingPolicy()) return false;
         final int user = mSelectedUserInteractor.getSelectedUserId();
+        final boolean routing = canRouteSecureSpaceFingerprint();
         final boolean userDoesNotHaveTrust = !getUserHasTrust(user);
         final boolean shouldListenForFingerprintAssistant = shouldListenForFingerprintAssistant();
         final boolean shouldListenKeyguardState =
@@ -3170,12 +3289,12 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
         final boolean fingerprintDisabledForUser = isFingerprintDisabled(user);
         final boolean shouldListenUserState =
                 !mSwitchingUser
-                        && !fingerprintDisabledForUser
+                        && (routing || !fingerprintDisabledForUser)
                         && (!mKeyguardGoingAway || !mDeviceInteractive)
                         && mIsSystemUser
-                        && biometricEnabledForUser
-                        && !isUserInLockdown(user);
-        final boolean strongerAuthRequired = !isUnlockingWithFingerprintAllowed();
+                        && (routing || biometricEnabledForUser)
+                        && (routing || !isUserInLockdown(user));
+        final boolean strongerAuthRequired = !routing && !isUnlockingWithFingerprintAllowed();
         final boolean shouldListenBouncerState =
                 !strongerAuthRequired || !isPrimaryBouncerShowingOrWillBeShowing();
         final boolean isUdfpsAuthRequiredOnCommunal =
@@ -3250,8 +3369,13 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
     }
 
     private void startListeningForFingerprint(boolean runDetect) {
+        if (mSecureSpaceEntry != null && mSecureSpaceEntry.isSwitchInProgress()) {
+            mLogger.v("Ignoring startListeningForFingerprint() during secure-space switch");
+            return;
+        }
         final int userId = mSelectedUserInteractor.getSelectedUserId();
-        final boolean unlockPossible = isUnlockWithFingerprintPossible(userId);
+        final boolean unlockPossible = isUnlockWithFingerprintPossible(userId)
+                || (canRouteSecureSpaceFingerprint() && !mFingerprintSensorProperties.isEmpty());
         if (mFingerprintCancelSignal != null) {
             mLogger.logUnexpectedFpCancellationSignalState(
                     mFingerprintRunningState,
@@ -3289,7 +3413,7 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
             } else {
                 mLogger.v("startListeningForFingerprint");
                 mFpm.authenticate(null /* crypto */, mFingerprintCancelSignal,
-                        mFingerprintAuthenticationCallback,
+                        fingerprintCallbackForGeneration(++mFingerprintSourceGeneration),
                         null /* handler */,
                         fingerprintAuthenticateOptions);
                 mFingerprintDetectRunning = false;
@@ -3373,6 +3497,7 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
     }
 
     private void stopListeningForFingerprint() {
+        mFingerprintSourceGeneration++;
         mLogger.v("stopListeningForFingerprint()");
         if (mFingerprintRunningState == BIOMETRIC_STATE_RUNNING) {
             if (mFingerprintCancelSignal != null) {

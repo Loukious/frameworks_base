@@ -32,6 +32,7 @@ import static android.os.UserHandle.USER_SYSTEM;
 import static android.security.Flags.secureLockdown;
 
 import static com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_NONE;
+import static com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_PASSWORD;
 import static com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_PASSWORD_OR_PIN;
 import static com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_PIN;
 import static com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_UNKNOWN;
@@ -39,6 +40,7 @@ import static com.android.internal.widget.LockPatternUtils.CURRENT_LSKF_BASED_PR
 import static com.android.internal.widget.LockPatternUtils.PIN_LENGTH_UNAVAILABLE;
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.PRIMARY_AUTH_REQUIRED_FOR_SECURE_LOCK_DEVICE;
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_LOCKOUT;
+import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN;
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_FOR_UNATTENDED_UPDATE;
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_BIOMETRIC_AUTH_REQUIRED_FOR_SECURE_LOCK_DEVICE;
 import static com.android.internal.widget.LockPatternUtils.USER_FRP;
@@ -100,6 +102,7 @@ import android.os.IBinder;
 import android.os.IProgressListener;
 import android.os.ParcelDuration;
 import android.os.Process;
+import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.ResultReceiver;
 import android.os.ServiceManager;
@@ -132,6 +135,7 @@ import android.util.Pair;
 import android.util.Slog;
 import android.util.SparseArray;
 import android.util.SparseIntArray;
+import android.util.SparseLongArray;
 
 import com.android.internal.R;
 import com.android.internal.annotations.GuardedBy;
@@ -144,11 +148,13 @@ import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.Preconditions;
 import com.android.internal.widget.ICheckCredentialProgressCallback;
 import com.android.internal.widget.ILockSettings;
+import com.android.internal.widget.ISecureSpaceCredentialAttempt;
 import com.android.internal.widget.IWeakEscrowTokenActivatedListener;
 import com.android.internal.widget.IWeakEscrowTokenRemovedListener;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.internal.widget.LockscreenCredential;
 import com.android.internal.widget.VerifyCredentialResponse;
+import com.android.internal.widget.SecureSpaceCredentialResponse;
 import com.android.server.LocalServices;
 import com.android.server.ServiceThread;
 import com.android.server.StorageManagerInternal;
@@ -191,6 +197,7 @@ import java.util.StringJoiner;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.crypto.BadPaddingException;
 import javax.crypto.IllegalBlockSizeException;
@@ -284,6 +291,52 @@ public class LockSettingsService extends ILockSettings.Stub {
     private final BiometricDeferredQueue mBiometricDeferredQueue;
     private final LongSparseArray<byte[]> mGatekeeperPasswords;
     private final SoftwareRateLimiter mSoftwareRateLimiter;
+    private final SecureAuthDuressCredentialStore mSecureAuthDuressCredentials;
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Long> mSecureSpacePrimaryGenerations =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicBoolean mSecureAuthErasureStarted =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    // Guarded by mSecureSpaceCredentialLock; callback reads must not dispatch to the UI thread.
+    private ISecureSpaceCredentialAttempt mSecureSpaceCredentialAttempt;
+    private static final class SecureSpaceLease {
+        private final SecureSpaceCredentialHandoff.Grant grant;
+        private volatile ISecureSpaceCredentialAttempt witness;
+        final boolean biometric;
+        final java.util.concurrent.atomic.AtomicBoolean witnessAttached;
+        final java.util.concurrent.atomic.AtomicBoolean active =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        final java.util.concurrent.atomic.AtomicBoolean consumed =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        SecureSpaceLease(SecureSpaceCredentialHandoff.Grant grant,
+                ISecureSpaceCredentialAttempt witness) {
+            this(grant, witness, false);
+        }
+        SecureSpaceLease(SecureSpaceCredentialHandoff.Grant grant,
+                ISecureSpaceCredentialAttempt witness, boolean biometric) {
+            this.grant = grant;
+            this.witness = witness;
+            this.biometric = biometric;
+            witnessAttached = new java.util.concurrent.atomic.AtomicBoolean(!biometric);
+        }
+        SecureSpaceCredentialHandoff.Grant grant() { return grant; }
+        ISecureSpaceCredentialAttempt witness() { return witness; }
+    }
+    private final java.util.concurrent.atomic.AtomicReference<SecureSpaceLease>
+            mSecureSpaceLease = new java.util.concurrent.atomic.AtomicReference<>();
+
+    private void revokeSecureSpaceLease(SecureSpaceLease lease) {
+        if (lease == null) return;
+        lease.active.set(false);
+        try { lease.witness().invalidate(); }
+        catch (RemoteException | RuntimeException e) {
+            // Native validity remains revoked even when callback delivery fails.
+        }
+    }
+    private final Object mSecureSpaceCredentialLock = new Object();
+    private final AtomicLong mSecureSpaceForegroundGeneration = new AtomicLong();
+    private final AtomicLong mSecureSpaceSessionEpoch = new AtomicLong();
+    private final SecureSpaceCredentialHandoff mSecureSpaceHandoff =
+            new SecureSpaceCredentialHandoff();
 
     private final NotificationManager mNotificationManager;
     protected final UserManager mUserManager;
@@ -382,6 +435,11 @@ public class LockSettingsService extends ILockSettings.Stub {
         @Override
         public void onUserUnlocking(@NonNull TargetUser user) {
             mLockSettingsService.onUserUnlocking(user.getUserIdentifier());
+        }
+
+        @Override
+        public void onUserSwitching(@Nullable TargetUser from, @NonNull TargetUser to) {
+            mLockSettingsService.mSecureSpaceForegroundGeneration.incrementAndGet();
         }
 
         @Override
@@ -745,6 +803,18 @@ public class LockSettingsService extends ILockSettings.Stub {
         mRecoverableKeyStoreManager = injector.getRecoverableKeyStoreManager();
         mHandler = injector.getHandler(injector.getServiceThread());
         mStrongAuth = injector.getStrongAuth();
+        mStrongAuth.setRequirementListener((reason, userId, beginsRequirement) -> {
+            if (beginsRequirement
+                    && (reason & STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN) != 0) {
+                mSecureSpaceSessionEpoch.incrementAndGet();
+            }
+            SecureSpaceLease lease = mSecureSpaceLease.get();
+            if (lease != null && ((reason & STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN) != 0
+                    || userId == USER_ALL
+                    || userId == lease.grant().destination().userId())) {
+                revokeSecureSpaceLease(lease);
+            }
+        });
         mActivityManager = injector.getActivityManager();
 
         boolean enforcing =
@@ -758,6 +828,7 @@ public class LockSettingsService extends ILockSettings.Stub {
         IntentFilter filter = new IntentFilter();
         filter.addAction(Intent.ACTION_USER_STARTING);
         filter.addAction(Intent.ACTION_LOCALE_CHANGED);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
         injector.getContext().registerReceiverAsUser(mBroadcastReceiver, UserHandle.ALL, filter,
                 null, null);
 
@@ -772,6 +843,7 @@ public class LockSettingsService extends ILockSettings.Stub {
         mGatekeeperPasswords = new LongSparseArray<>();
 
         mSpManager = injector.getSyntheticPasswordManager(mStorage, mKeyStore);
+        mSecureAuthDuressCredentials = new SecureAuthDuressCredentialStore(mStorage, mSpManager);
         mUnifiedProfilePasswordCache = injector.getUnifiedProfilePasswordCache(mKeyStore);
         mBiometricDeferredQueue = new BiometricDeferredQueue(mSpManager);
 
@@ -972,6 +1044,9 @@ public class LockSettingsService extends ILockSettings.Stub {
             if (Intent.ACTION_USER_STARTING.equals(intent.getAction())) {
                 final int userHandle = intent.getIntExtra(Intent.EXTRA_USER_HANDLE, 0);
                 mStorage.prefetchUser(userHandle);
+            } else if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
+                // Never wait for the credential transaction lock to invalidate a sleeping session.
+                mSecureSpaceSessionEpoch.incrementAndGet();
             } else if (Intent.ACTION_LOCALE_CHANGED.equals(intent.getAction())) {
                 updateActivatedEncryptionNotifications("locale changed");
             }
@@ -2560,6 +2635,707 @@ public class LockSettingsService extends ILockSettings.Stub {
         }
     }
 
+    /**
+     * Trusted keyguard entry point. Candidate discovery stays in system_server and no early
+     * callback can dismiss the original user's keyguard while an alternate is being checked.
+     * This API does not itself switch users or dismiss keyguard.
+     */
+    @Override
+    public SecureSpaceCredentialResponse checkSecureSpaceCredential(
+            LockscreenCredential credential, int expectedUserId, int expectedSerialNumber,
+            ISecureSpaceCredentialAttempt attemptWitness) {
+        try {
+            checkReadPermission();
+            Objects.requireNonNull(attemptWitness);
+            if (credential == null || credential.isNone()) {
+                throw new IllegalArgumentException("Missing lockscreen credential");
+            }
+            final long identity = Binder.clearCallingIdentity();
+            try {
+                synchronized (mSecureSpaceCredentialLock) {
+                    mSecureSpaceHandoff.clear();
+                    mSecureSpaceCredentialAttempt = attemptWitness;
+                    if (mSecureAuthErasureStarted.get()) return SecureSpaceCredentialResponse.erasurePending();
+                    final long sessionEpoch = mSecureSpaceSessionEpoch.get();
+                    final long foregroundGeneration = mSecureSpaceForegroundGeneration.get();
+                    final UserInfo origin = mUserManager.getUserInfo(expectedUserId);
+                    if (!isSecureSpaceCredentialAttemptActive(attemptWitness)
+                            || !isSecureSpaceScreenInteractive() || !isSecureSpaceRoutingUser(origin)
+                            || origin.serialNumber != expectedSerialNumber
+                            || ActivityManager.getCurrentUser() != expectedUserId
+                            || getCredentialType(expectedUserId) == CREDENTIAL_TYPE_NONE) {
+                        return SecureSpaceCredentialResponse.unavailable();
+                    }
+                    final SecureLockDeviceServiceInternal secureLockDevice =
+                            LocalServices.getService(SecureLockDeviceServiceInternal.class);
+                    if (secureLockDevice != null && secureLockDevice.isSecureLockDeviceEnabled()) {
+                        // The second-factor flow has separate dismissal rules.
+                        return SecureSpaceCredentialResponse.unavailable();
+                    }
+                    final List<SecureSpaceCredentialRouter.Candidate> candidates =
+                            new ArrayList<>();
+                    candidates.add(new SecureSpaceCredentialRouter.Candidate(
+                            origin.id, origin.serialNumber));
+                    final boolean mayRoute = !mUserManager.hasUserRestriction(
+                            UserManager.DISALLOW_USER_SWITCH, origin.getUserHandle());
+                    if (mayRoute) {
+                        final List<UserInfo> users = new ArrayList<>(mUserManager.getAliveUsers());
+                        users.sort((left, right) -> Integer.compare(left.id, right.id));
+                        for (UserInfo user : users) {
+                            if (user.id != expectedUserId && isSecureSpaceRoutingUser(user)
+                                    && getCredentialType(user.id) != CREDENTIAL_TYPE_NONE) {
+                                candidates.add(new SecureSpaceCredentialRouter.Candidate(
+                                        user.id, user.serialNumber));
+                            }
+                        }
+                    }
+                    if (candidates.size() > SecureSpaceCredentialRouter.MAX_CANDIDATES) {
+                        return SecureSpaceCredentialResponse.unavailable();
+                    }
+                    final SparseLongArray protectors = new SparseLongArray();
+                    final SparseLongArray verifiedRequirementGenerations = new SparseLongArray();
+                    synchronized (mSpManager) {
+                        for (SecureSpaceCredentialRouter.Candidate candidate : candidates) {
+                            protectors.put(candidate.userId(),
+                                    getCurrentLskfBasedProtectorId(candidate.userId()));
+                        }
+                    }
+                    final SecureSpaceCredentialRouter.Result result =
+                            SecureSpaceCredentialRouter.check(candidates,
+                                    new SecureSpaceCredentialRouter.Verifier() {
+                                        @Override
+                                        public boolean isCurrent(
+                                                SecureSpaceCredentialRouter.Candidate candidate) {
+                                            UserInfo current = mUserManager.getUserInfo(
+                                                    candidate.userId());
+                                            UserInfo currentOrigin = mUserManager.getUserInfo(
+                                                    expectedUserId);
+                                            final boolean sameProtector;
+                                            synchronized (mSpManager) {
+                                                sameProtector = protectors.get(candidate.userId())
+                                                        == getCurrentLskfBasedProtectorId(
+                                                                candidate.userId());
+                                            }
+                                            return sameProtector
+                                                    && (verifiedRequirementGenerations.indexOfKey(
+                                                            candidate.userId()) < 0
+                                                            || verifiedRequirementGenerations.get(
+                                                                    candidate.userId())
+                                                                    == mStrongAuth.getRequirementGeneration(
+                                                                            candidate.userId()))
+                                                    && isSecureSpaceScreenInteractive()
+                                                    && isSecureSpaceCredentialAttemptActive(attemptWitness)
+                                                    && mSecureSpaceSessionEpoch.get() == sessionEpoch
+                                                    && (secureLockDevice == null
+                                                            || !secureLockDevice
+                                                                    .isSecureLockDeviceEnabled())
+                                                    && mSecureSpaceForegroundGeneration.get()
+                                                            == foregroundGeneration
+                                                    && ActivityManager.getCurrentUser() == expectedUserId
+                                                    && isSecureSpaceRoutingUser(currentOrigin)
+                                                    && currentOrigin.serialNumber
+                                                            == expectedSerialNumber
+                                                    && isSecureSpaceRoutingUser(current)
+                                                    && current.serialNumber
+                                                            == candidate.serialNumber()
+                                                    && (candidate.userId() == expectedUserId
+                                                            || !mUserManager.hasUserRestriction(
+                                                                    UserManager.DISALLOW_USER_SWITCH,
+                                                                    currentOrigin.getUserHandle()))
+                                                    && !Thread.currentThread().isInterrupted();
+                                        }
+
+                                        @Override
+                                        public SecureSpaceCredentialRouter.Probe verify(
+                                                SecureSpaceCredentialRouter.Candidate candidate) {
+                                            try (LockscreenCredential candidateCredential =
+                                                    credential.duplicateForSecureSpaceVerification(
+                                                            getCredentialType(candidate.userId()))) {
+                                                if (candidateCredential == null) {
+                                                    return new SecureSpaceCredentialRouter.Probe(
+                                                            SecureSpaceCredentialRouter.INCONCLUSIVE,
+                                                            0, false);
+                                                }
+                                                long requirementGeneration = mStrongAuth
+                                                        .getRequirementGeneration(candidate.userId());
+                                                VerifyCredentialResponse response = doVerifyCredential(
+                                                        candidateCredential, candidate.userId(), null, 0);
+                                                if (response.isMatched()) {
+                                                    verifiedRequirementGenerations.put(candidate.userId(),
+                                                            requirementGeneration);
+                                                }
+                                                int outcome = response.isMatched()
+                                                        ? SecureSpaceCredentialRouter.MATCHED
+                                                        : response.isCredCertainlyIncorrect()
+                                                                ? SecureSpaceCredentialRouter.INCORRECT
+                                                                : SecureSpaceCredentialRouter.INCONCLUSIVE;
+                                                return new SecureSpaceCredentialRouter.Probe(outcome,
+                                                        SecureSpaceCredentialRouter.timeoutMillis(
+                                                                response.getTimeoutAsDuration()),
+                                                        response.isCredAlreadyTried());
+                                            }
+                                        }
+                                    });
+                    if (result.matched == null
+                            && result.attempts.stream().noneMatch(attempt ->
+                                    attempt.probe().outcome() == SecureSpaceCredentialRouter.MATCHED)
+                            && isSecureSpaceScreenInteractive()
+                            && isSecureSpaceCredentialAttemptActive(attemptWitness)
+                            && mSecureSpaceSessionEpoch.get() == sessionEpoch
+                            && mSecureSpaceForegroundGeneration.get() == foregroundGeneration
+                            && ActivityManager.getCurrentUser() == expectedUserId) {
+                        synchronized (mSpManager) {
+                            List<SecureAuthDuressReservation.Identity> namespace =
+                                    secureAuthNormalNamespace();
+                            boolean completeRejection = result.allCertainlyIncorrect
+                                    && namespace.size() == result.attempts.size()
+                                    && namespace.stream().allMatch(nativeUser ->
+                                        result.attempts.stream().anyMatch(attempt ->
+                                            attempt.candidate().userId() == nativeUser.userId()
+                                            && attempt.candidate().serialNumber() == nativeUser.serialNumber()
+                                            && protectors.get(nativeUser.userId()) == nativeUser.protectorId()));
+                            if ((completeRejection || mSecureAuthDuressCredentials.reservationCovers(namespace))
+                                    && mSecureAuthDuressCredentials.matchesAfterNormalRejection(credential)
+                                    && mSecureSpaceSessionEpoch.get() == sessionEpoch
+                                    && mSecureSpaceForegroundGeneration.get() == foregroundGeneration
+                                    && isSecureSpaceCredentialAttemptActive(attemptWitness)
+                                    && mSecureAuthErasureStarted.compareAndSet(false, true)) {
+                                mSecureSpaceHandoff.clear();
+                                revokeSecureSpaceLease(mSecureSpaceLease.get());
+                                mStrongAuth.requireStrongAuth(STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN,
+                                        UserHandle.USER_ALL);
+                                new Thread(com.android.server.recoverysystem.SecureAuthDuressWipe::run,
+                                        "SecureAuthKeyErasure").start();
+                                return SecureSpaceCredentialResponse.erasurePending();
+                            }
+                        }
+                    }
+                    int size = result.attempts.size();
+                    int[] userIds = new int[size];
+                    int[] serialNumbers = new int[size];
+                    int[] outcomes = new int[size];
+                    long[] timeouts = new long[size];
+                    boolean[] duplicates = new boolean[size];
+                    for (int i = 0; i < size; i++) {
+                        SecureSpaceCredentialRouter.Attempt attempt = result.attempts.get(i);
+                        userIds[i] = attempt.candidate().userId();
+                        serialNumbers[i] = attempt.candidate().serialNumber();
+                        outcomes[i] = attempt.probe().outcome();
+                        timeouts[i] = attempt.probe().timeoutMillis();
+                        duplicates[i] = attempt.probe().duplicate();
+                    }
+                    IBinder handoffToken = null;
+                    if (result.matched != null) {
+                        IBinder token = new Binder();
+                        SecureSpaceCredentialHandoff.Grant grant = mSecureSpaceHandoff.issue(
+                                token, candidates.get(0), result.matched,
+                                protectors.get(origin.id), protectors.get(result.matched.userId()),
+                                foregroundGeneration, sessionEpoch,
+                                verifiedRequirementGenerations.get(result.matched.userId()),
+                                SystemClock.elapsedRealtime());
+                        if (grant != null && isSecureSpaceGrantIdentityCurrent(grant)
+                                && isSecureSpaceCredentialAttemptActive(attemptWitness)
+                                && mSecureSpaceForegroundGeneration.get() == foregroundGeneration
+                                && mSecureSpaceSessionEpoch.get() == sessionEpoch
+                                && ActivityManager.getCurrentUser() == origin.id) {
+                            SecureSpaceLease lease = new SecureSpaceLease(grant, attemptWitness);
+                            revokeSecureSpaceLease(mSecureSpaceLease.getAndSet(lease));
+                            mHandler.postDelayed(() -> {
+                                if (mSecureSpaceLease.compareAndSet(lease, null)) {
+                                    revokeSecureSpaceLease(lease);
+                                }
+                            }, 30_000);
+                            // A strong-auth request may have raced installation of the lease.
+                            if (!isSecureSpaceGrantIdentityCurrent(grant)
+                                    || mSecureSpaceSessionEpoch.get() != sessionEpoch) {
+                                revokeSecureSpaceLease(lease);
+                                mSecureSpaceHandoff.clear();
+                            } else {
+                                handoffToken = token;
+                            }
+                        } else {
+                            mSecureSpaceHandoff.clear();
+                        }
+                    }
+                    return new SecureSpaceCredentialResponse(
+                            result.matched == null ? UserHandle.USER_NULL : result.matched.userId(),
+                            result.matched == null ? -1 : result.matched.serialNumber(),
+                            result.allCertainlyIncorrect && mayRoute
+                                    && isSecureSpaceRoutingCohortCurrent(origin, candidates),
+                            userIds, serialNumbers, outcomes,
+                            timeouts, duplicates, handoffToken);
+                }
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        } finally {
+            LockscreenCredential.zeroizeIfFromParcel(credential);
+        }
+    }
+
+    private void enforceSecureSpaceHandoffCaller() {
+        checkReadPermission();
+    }
+
+    private static boolean isSecureSpaceCredentialAttemptActive(
+            ISecureSpaceCredentialAttempt attempt) {
+        if (attempt == null) return false;
+        try {
+            return attempt.isActive();
+        } catch (RemoteException | RuntimeException failedWitness) {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean setInitialSecureSpaceCredential(LockscreenCredential ownerCredential,
+            LockscreenCredential credential, int userId, int serialNumber) {
+        try {
+            enforceSecureSpaceHandoffCaller();
+            checkWritePermission();
+            Objects.requireNonNull(credential);
+            if (!credential.isPin() && !credential.isPassword()) {
+                throw new IllegalArgumentException("A PIN or password is required");
+            }
+            credential.validateBasicRequirements();
+            if (credential.isPin()) {
+                for (byte digit : credential.getCredential()) {
+                    if (digit < '0' || digit > '9') {
+                        throw new IllegalArgumentException("PIN must contain digits");
+                    }
+                }
+            }
+            long identity = Binder.clearCallingIdentity();
+            try {
+                boolean changed;
+                synchronized (mSecureSpaceCredentialLock) {
+                    Object proofToken = new Object();
+                    SecureSpaceCredentialHandoff proof = verifySecureAuthDuressOwner(
+                            ownerCredential, proofToken);
+                    byte[] ownerBytes = ownerCredential.getCredential();
+                    byte[] spaceBytes = credential.getCredential();
+                    int difference = ownerBytes.length ^ spaceBytes.length;
+                    for (int i = 0; i < Math.min(ownerBytes.length, spaceBytes.length); i++) {
+                        difference |= ownerBytes[i] ^ spaceBytes[i];
+                    }
+                    if (difference == 0) {
+                        throw new IllegalArgumentException("Use a different Space credential");
+                    }
+                    synchronized (mSeparateChallengeLock) {
+                        synchronized (mSpManager) {
+                            UserInfo target = mUserManager.getUserInfo(userId);
+                            int ownerType = getCredentialTypeInternal(UserHandle.USER_SYSTEM);
+                            if (ownerType != CREDENTIAL_TYPE_PIN
+                                    && ownerType != CREDENTIAL_TYPE_PASSWORD) {
+                                throw new SecurityException("Owner PIN or password required");
+                            }
+                            // Xiaomi-style creation restriction only: later credential changes
+                            // remain independent. Recheck under the native credential lock so
+                            // changing the owner type during the picker cannot bypass this rule.
+                            if (credential.getType() != ownerType) {
+                                throw new IllegalArgumentException(
+                                        "Initial Space credential must match the owner type");
+                            }
+                            if (target == null || target.id == UserHandle.USER_SYSTEM
+                                    || target.serialNumber != serialNumber || target.partial
+                                    || target.preCreated || !target.isEnabled() || !target.isFull()
+                                    || !UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(target.userType)
+                                    || getCredentialTypeInternal(userId) != CREDENTIAL_TYPE_NONE) {
+                                throw new SecurityException("Unconfigured Space identity required");
+                            }
+                            consumeSecureAuthDuressOwner(proof, proofToken);
+                            try (LockscreenCredential none = LockscreenCredential.createNone()) {
+                                changed = setLockCredentialInternal(credential, none, userId, false);
+                            }
+                        }
+                        if (changed) {
+                            setSeparateProfileChallengeEnabledLocked(userId, true, null);
+                            notifyPasswordMetricsChanged(credential, userId);
+                        }
+                    }
+                }
+                // Password history queries DPM; do not hold any LockSettings lock here.
+                if (changed) {
+                    notifySeparateProfileChallengeChanged(userId);
+                    onPostLockCredentialChanged(credential, userId);
+                }
+                if (!changed) {
+                    Slog.w(TAG, "Initial Secure Space credential write was rejected");
+                }
+                // UserController performs first-start initialization normally when opened.
+                return changed;
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        } catch (RuntimeException rejected) {
+            Slog.w(TAG, "Initial Secure Space credential rejected", rejected);
+            throw rejected;
+        } finally {
+            LockscreenCredential.zeroizeIfFromParcel(ownerCredential);
+            LockscreenCredential.zeroizeIfFromParcel(credential);
+        }
+    }
+
+    @Override
+    public void setSecureAuthDuressCredentials(LockscreenCredential ownerCredential,
+            LockscreenCredential pin, LockscreenCredential password) {
+        try {
+            enforceSecureSpaceHandoffCaller();
+            checkWritePermission();
+            Objects.requireNonNull(pin);
+            Objects.requireNonNull(password);
+            if ((!pin.isNone() || !password.isNone())
+                    && (ownerCredential == null
+                        || (!ownerCredential.isPin() && !ownerCredential.isPassword()))) {
+                throw new SecurityException("Owner PIN or password required for duress entry");
+            }
+            long identity = Binder.clearCallingIdentity();
+            try {
+                synchronized (mSecureSpaceCredentialLock) {
+                    Object proofToken = new Object();
+                    SecureSpaceCredentialHandoff proof = verifySecureAuthDuressOwner(
+                            ownerCredential, proofToken);
+                    String encoded = mSecureAuthDuressCredentials.prepareEnrollment(pin, password);
+                    List<SecureAuthDuressReservation.Identity> certified = secureAuthNormalNamespace();
+                    if (encoded != null) {
+                        if (certified.isEmpty() || certified.size() > 4) {
+                            throw new SecurityException("Unsupported native credential namespace");
+                        }
+                        for (SecureAuthDuressReservation.Identity nativeUser : certified) {
+                            for (LockscreenCredential secret : new LockscreenCredential[]{pin, password}) {
+                                try (LockscreenCredential typed = secret.duplicateForSecureSpaceVerification(
+                                        getCredentialType(nativeUser.userId()))) {
+                                    if (typed == null || !doVerifyCredential(typed, nativeUser.userId(), null, 0)
+                                            .isCredCertainlyIncorrect()) {
+                                        throw new SecurityException("Duress secret conflicts or native verification unavailable");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    synchronized (mSpManager) {
+                        int ownerType = getCredentialTypeInternal(UserHandle.USER_SYSTEM);
+                        if (encoded != null && ownerType != CREDENTIAL_TYPE_PIN
+                                && ownerType != CREDENTIAL_TYPE_PASSWORD) {
+                            throw new SecurityException("Owner PIN or password required");
+                        }
+                        consumeSecureAuthDuressOwner(proof, proofToken);
+                        if (mSecureAuthErasureStarted.get() || !certified.equals(secureAuthNormalNamespace())) {
+                            throw new SecurityException("Native credential namespace changed");
+                        }
+                        mSecureAuthDuressCredentials.commitEnrollment(encoded, certified);
+                    }
+                }
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        } finally {
+            LockscreenCredential.zeroizeIfFromParcel(ownerCredential);
+            LockscreenCredential.zeroizeIfFromParcel(pin);
+            LockscreenCredential.zeroizeIfFromParcel(password);
+        }
+    }
+
+    /** Native credential identities only; callers retain SP locking through final use. */
+    private List<SecureAuthDuressReservation.Identity> secureAuthNormalNamespace() {
+        synchronized (mSpManager) {
+            List<SecureAuthDuressReservation.Identity> result = new ArrayList<>();
+            for (UserInfo user : mUserManager.getUsers(false, false, false)) {
+                if (!user.isFull()) continue;
+                int type = getCredentialTypeInternal(user.id);
+                if (type != CREDENTIAL_TYPE_PIN && type != CREDENTIAL_TYPE_PASSWORD) continue;
+                long protector = getCurrentLskfBasedProtectorId(user.id);
+                if (protector == 0) throw new IllegalStateException("Missing native credential protector");
+                result.add(new SecureAuthDuressReservation.Identity(user.id, user.serialNumber, protector));
+            }
+            result.sort(java.util.Comparator.comparingInt(SecureAuthDuressReservation.Identity::userId));
+            return List.copyOf(result);
+        }
+    }
+
+    @Override
+    public boolean hasSecureAuthDuressCredentials(LockscreenCredential ownerCredential) {
+        try {
+            enforceSecureSpaceHandoffCaller();
+            long identity = Binder.clearCallingIdentity();
+            try {
+                synchronized (mSecureSpaceCredentialLock) {
+                    Object proofToken = new Object();
+                    SecureSpaceCredentialHandoff proof = verifySecureAuthDuressOwner(
+                            ownerCredential, proofToken);
+                    boolean configured = mSecureAuthDuressCredentials.isConfigured();
+                    consumeSecureAuthDuressOwner(proof, proofToken);
+                    return configured;
+                }
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        } finally {
+            LockscreenCredential.zeroizeIfFromParcel(ownerCredential);
+        }
+    }
+
+    private SecureSpaceCredentialHandoff verifySecureAuthDuressOwner(
+            LockscreenCredential credential, Object proofToken) {
+        Objects.requireNonNull(credential);
+        final long issuedAt = SystemClock.elapsedRealtime();
+        final int ownerId = UserHandle.USER_SYSTEM;
+        UserInfo owner = mUserManager.getUserInfo(ownerId);
+        long foregroundGeneration = mSecureSpaceForegroundGeneration.get();
+        long sessionEpoch = mSecureSpaceSessionEpoch.get();
+        long requirementGeneration = mStrongAuth.getRequirementGeneration(ownerId);
+        SecureLockDeviceServiceInternal secureLockDevice =
+                LocalServices.getService(SecureLockDeviceServiceInternal.class);
+        if (!isSecureSpaceRoutingUser(owner) || !owner.isAdmin()
+                || ActivityManager.getCurrentUser() != ownerId || !isSecureSpaceScreenInteractive()
+                || credential.isNone() || getCredentialType(ownerId) == CREDENTIAL_TYPE_NONE
+                || (secureLockDevice != null && secureLockDevice.isSecureLockDeviceEnabled())) {
+            throw new SecurityException("Fresh foreground owner authentication required");
+        }
+        long protector;
+        synchronized (mSpManager) {
+            protector = getCurrentLskfBasedProtectorId(ownerId);
+        }
+        VerifyCredentialResponse response = doVerifyCredential(credential, ownerId, null, 0);
+        UserInfo current = mUserManager.getUserInfo(ownerId);
+        boolean currentProtector;
+        synchronized (mSpManager) {
+            currentProtector = protector != 0
+                    && protector == getCurrentLskfBasedProtectorId(ownerId);
+        }
+        if (!response.isMatched() || !currentProtector || !isSecureSpaceRoutingUser(current)
+                || current.serialNumber != owner.serialNumber || !current.isAdmin()
+                || ActivityManager.getCurrentUser() != ownerId || !isSecureSpaceScreenInteractive()
+                || mSecureSpaceForegroundGeneration.get() != foregroundGeneration
+                || mSecureSpaceSessionEpoch.get() != sessionEpoch
+                || mStrongAuth.getRequirementGeneration(ownerId) != requirementGeneration
+                || (secureLockDevice != null && secureLockDevice.isSecureLockDeviceEnabled())) {
+            throw new SecurityException("Owner authentication was rejected or became stale");
+        }
+        SecureSpaceCredentialHandoff proof = new SecureSpaceCredentialHandoff();
+        SecureSpaceCredentialRouter.Candidate candidate =
+                new SecureSpaceCredentialRouter.Candidate(ownerId, owner.serialNumber);
+        SecureSpaceCredentialHandoff.Grant grant = proof.issue(proofToken, candidate, candidate,
+                protector, protector, foregroundGeneration, sessionEpoch,
+                requirementGeneration, issuedAt);
+        if (grant == null || !proof.prepare(proofToken, secureSpaceHandoffSnapshot(grant))) {
+            throw new SecurityException("Owner authentication proof expired");
+        }
+        return proof;
+    }
+
+    private void consumeSecureAuthDuressOwner(SecureSpaceCredentialHandoff proof,
+            Object proofToken) {
+        SecureSpaceCredentialHandoff.Grant grant = proof.pending(proofToken);
+        UserInfo owner = mUserManager.getUserInfo(UserHandle.USER_SYSTEM);
+        if (grant == null || owner == null || !owner.isAdmin()
+                || !proof.consume(proofToken, UserHandle.USER_SYSTEM,
+                        grant.destination().serialNumber(), secureSpaceHandoffSnapshot(grant))) {
+            throw new SecurityException("Owner authentication proof became stale");
+        }
+    }
+
+    @Override
+    public boolean prepareSecureSpaceCredentialHandoff(IBinder token) {
+        enforceSecureSpaceHandoffCaller();
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            synchronized (mSecureSpaceCredentialLock) {
+                SecureSpaceCredentialHandoff.Grant grant = mSecureSpaceHandoff.pending(token);
+                SecureSpaceLease typedLease = mSecureSpaceLease.get();
+                if (grant == null || typedLease == null || typedLease.grant() != grant
+                        || !typedLease.witnessAttached.get()) return false;
+                if (!isSecureSpaceCredentialAttemptActive(mSecureSpaceCredentialAttempt)) {
+                    mSecureSpaceHandoff.cancel(token);
+                    mSecureSpaceCredentialAttempt = null;
+                    return false;
+                }
+                return mSecureSpaceHandoff.prepare(token,
+                        secureSpaceHandoffSnapshot(grant));
+            }
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    @Override
+    public boolean consumeSecureSpaceCredentialHandoff(IBinder token, int userId, int serialNumber) {
+        return consumeSecureSpaceHandoff(token, userId, serialNumber, false);
+    }
+
+    @Override
+    public boolean consumeSecureSpaceFingerprintHandoff(IBinder token, int userId, int serialNumber) {
+        return consumeSecureSpaceHandoff(token, userId, serialNumber, true);
+    }
+
+    private boolean consumeSecureSpaceHandoff(IBinder token, int userId, int serialNumber,
+            boolean biometric) {
+        enforceSecureSpaceHandoffCaller();
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            synchronized (mSecureSpaceCredentialLock) {
+                SecureSpaceCredentialHandoff.Grant grant = mSecureSpaceHandoff.pending(token);
+                SecureSpaceLease typedLease = mSecureSpaceLease.get();
+                if (grant == null || typedLease == null || typedLease.grant() != grant
+                        || typedLease.biometric != biometric
+                        || !typedLease.witnessAttached.get()) return false;
+                if (!isSecureSpaceCredentialAttemptActive(mSecureSpaceCredentialAttempt)) {
+                    mSecureSpaceHandoff.cancel(token);
+                    mSecureSpaceCredentialAttempt = null;
+                    return false;
+                }
+                boolean consumed = mSecureSpaceHandoff.consume(token, userId, serialNumber,
+                        secureSpaceHandoffSnapshot(grant));
+                mSecureSpaceCredentialAttempt = null;
+                SecureSpaceLease lease = mSecureSpaceLease.get();
+                if (!consumed || lease == null || lease.grant() != grant
+                        || !lease.active.get()) return false;
+                lease.consumed.set(true);
+                return true;
+            }
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    @Override
+    public boolean attachSecureSpaceFingerprintWitness(IBinder token, int originUserId,
+            int originSerial, int destinationUserId, int destinationSerial,
+            ISecureSpaceCredentialAttempt witness) {
+        enforceSecureSpaceHandoffCaller();
+        Objects.requireNonNull(witness);
+        long identity = Binder.clearCallingIdentity();
+        try {
+            synchronized (mSecureSpaceCredentialLock) {
+                SecureSpaceLease lease = mSecureSpaceLease.get();
+                SecureSpaceCredentialHandoff.Grant grant = mSecureSpaceHandoff.pending(token);
+                if (lease == null || grant == null || lease.grant() != grant || !lease.biometric
+                        || grant.origin().userId() != originUserId
+                        || grant.origin().serialNumber() != originSerial
+                        || grant.destination().userId() != destinationUserId
+                        || grant.destination().serialNumber() != destinationSerial
+                        || SystemClock.elapsedRealtime() >= grant.expiresAt()
+                        || ActivityManager.getCurrentUser() != originUserId
+                        || mSecureSpaceForegroundGeneration.get() != grant.foregroundGeneration()
+                        || !isSecureSpaceGrantIdentityCurrent(grant) || !lease.active.get()
+                        || !isSecureSpaceCredentialAttemptActive(witness)
+                        || !lease.witnessAttached.compareAndSet(false, true)) return false;
+                lease.witness = witness;
+                mSecureSpaceCredentialAttempt = witness;
+                if (!lease.active.get() || mSecureSpaceSessionEpoch.get() != grant.sessionEpoch()
+                        || !isSecureSpaceGrantIdentityCurrent(grant)) {
+                    revokeSecureSpaceLease(lease);
+                    return false;
+                }
+                return true;
+            }
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    @Override
+    public boolean isSecureAuthErasurePending() {
+        enforceSecureSpaceHandoffCaller();
+        return mSecureAuthErasureStarted.get();
+    }
+
+    /** Short authoritative check; never waits on credential verification or SP locks. */
+    @Override
+    public boolean isSecureSpaceAuthenticationLeaseCurrent(IBinder token,
+            int userId, int serialNumber) {
+        enforceSecureSpaceHandoffCaller();
+        SecureSpaceLease lease = mSecureSpaceLease.get();
+        if (mSecureAuthErasureStarted.get() || lease == null || !lease.active.get() || !lease.consumed.get()) return false;
+        SecureSpaceCredentialHandoff.Grant grant = lease.grant();
+        long generation = grant.foregroundGeneration()
+                + (grant.origin().userId() == grant.destination().userId() ? 0 : 1);
+        return grant.token() == token && grant.destination().userId() == userId
+                && grant.destination().serialNumber() == serialNumber
+                && SystemClock.elapsedRealtime() < grant.expiresAt()
+                && mSecureSpaceSessionEpoch.get() == grant.sessionEpoch()
+                && mSecureSpaceForegroundGeneration.get() == generation
+                && mStrongAuth.getRequirementGeneration(userId) == grant.strongAuthGeneration()
+                && lease == mSecureSpaceLease.get() && lease.active.get();
+    }
+
+    @Override
+    public void cancelSecureSpaceCredentialHandoff(IBinder token) {
+        enforceSecureSpaceHandoffCaller();
+        synchronized (mSecureSpaceCredentialLock) {
+            if (mSecureSpaceHandoff.pending(token) != null) {
+                mSecureSpaceCredentialAttempt = null;
+            }
+            mSecureSpaceHandoff.cancel(token);
+        }
+    }
+
+    private SecureSpaceCredentialHandoff.Snapshot secureSpaceHandoffSnapshot(
+            SecureSpaceCredentialHandoff.Grant grant) {
+        boolean current = isSecureSpaceGrantIdentityCurrent(grant);
+        boolean unlocked = mUserManager.isUserUnlocked(grant.destination().userId());
+        return new SecureSpaceCredentialHandoff.Snapshot(SystemClock.elapsedRealtime(),
+                ActivityManager.getCurrentUser(), mSecureSpaceForegroundGeneration.get(),
+                mSecureSpaceSessionEpoch.get(),
+                mStrongAuth.getRequirementGeneration(grant.destination().userId()),
+                current, unlocked);
+    }
+
+    private boolean isSecureSpaceScreenInteractive() {
+        PowerManager power = mContext.getSystemService(PowerManager.class);
+        return power != null && power.isInteractive();
+    }
+
+    private boolean isSecureSpaceGrantIdentityCurrent(SecureSpaceCredentialHandoff.Grant grant) {
+        UserInfo origin = mUserManager.getUserInfo(grant.origin().userId());
+        UserInfo destination = mUserManager.getUserInfo(grant.destination().userId());
+        if (!isSecureSpaceScreenInteractive() || !isSecureSpaceRoutingUser(origin)
+                || origin.serialNumber != grant.origin().serialNumber()
+                || !isSecureSpaceRoutingUser(destination)
+                || destination.serialNumber != grant.destination().serialNumber()
+                || (origin.id != destination.id && mUserManager.hasUserRestriction(
+                        UserManager.DISALLOW_USER_SWITCH, origin.getUserHandle()))) {
+            return false;
+        }
+        SecureLockDeviceServiceInternal secureLockDevice =
+                LocalServices.getService(SecureLockDeviceServiceInternal.class);
+        if (secureLockDevice != null && secureLockDevice.isSecureLockDeviceEnabled()) return false;
+        if (grant.strongAuthGeneration()
+                != mStrongAuth.getRequirementGeneration(destination.id)) return false;
+        synchronized (mSpManager) {
+            return grant.originProtector() == getCurrentLskfBasedProtectorId(origin.id)
+                    && grant.destinationProtector() == getCurrentLskfBasedProtectorId(destination.id);
+        }
+    }
+
+    private boolean isSecureSpaceRoutingUser(@Nullable UserInfo user) {
+        return user != null && !user.partial && !user.preCreated && user.isFull()
+                && user.isEnabled() && user.isInitialized()
+                && (user.id == UserHandle.USER_SYSTEM
+                        || UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(user.userType));
+    }
+
+    private boolean isSecureSpaceRoutingCohortCurrent(UserInfo origin,
+            List<SecureSpaceCredentialRouter.Candidate> candidates) {
+        // A newly created/enabled space must not be omitted from a duress-negative decision.
+        boolean maySwitch = !mUserManager.hasUserRestriction(UserManager.DISALLOW_USER_SWITCH,
+                origin.getUserHandle());
+        int count = 0;
+        for (UserInfo user : mUserManager.getAliveUsers()) {
+            if (!isSecureSpaceRoutingUser(user)
+                    || (user.id != origin.id && (!maySwitch
+                            || getCredentialType(user.id) == CREDENTIAL_TYPE_NONE))) {
+                continue;
+            }
+            count++;
+            if (!candidates.contains(new SecureSpaceCredentialRouter.Candidate(
+                    user.id, user.serialNumber))) {
+                return false;
+            }
+        }
+        return count == candidates.size();
+    }
+
     @Override
     @Nullable
     public VerifyCredentialResponse verifyCredential(LockscreenCredential credential,
@@ -2623,6 +3399,8 @@ public class LockSettingsService extends ILockSettings.Stub {
     private VerifyCredentialResponse doVerifyCredential(LockscreenCredential credential,
             int userId, ICheckCredentialProgressCallback progressCallback,
             @LockPatternUtils.VerifyFlag int flags) {
+        final long primaryGeneration = userId >= 0 ? mStrongAuth.getRequirementGeneration(userId) : -1;
+        if (mSecureAuthErasureStarted.get()) return VerifyCredentialResponse.OTHER_ERROR;
         if (credential == null || credential.isNone()) {
             throw new IllegalArgumentException("Credential can't be null or empty");
         }
@@ -2692,6 +3470,7 @@ public class LockSettingsService extends ILockSettings.Stub {
                 }
             }
             if (response.isMatched()) {
+                mSecureSpacePrimaryGenerations.put(userId, primaryGeneration);
                 Slogf.i(TAG, "Successfully verified lockscreen credential for user %d", userId);
                 onCredentialVerified(
                         authResult.syntheticPassword,
@@ -3306,6 +4085,12 @@ public class LockSettingsService extends ILockSettings.Stub {
 
     private void setCurrentLskfBasedProtectorId(long newProtectorId, int userId) {
         final long oldProtectorId = getCurrentLskfBasedProtectorId(userId);
+        SecureSpaceLease lease = mSecureSpaceLease.get();
+        if (lease != null && oldProtectorId != newProtectorId
+                && (userId == lease.grant().origin().userId()
+                        || userId == lease.grant().destination().userId())) {
+            revokeSecureSpaceLease(lease);
+        }
         setLong(CURRENT_LSKF_BASED_PROTECTOR_ID_KEY, newProtectorId, userId);
         setLong(PREV_LSKF_BASED_PROTECTOR_ID_KEY, oldProtectorId, userId);
         setLong(LSKF_LAST_CHANGED_TIME_KEY, System.currentTimeMillis(), userId);
@@ -3431,6 +4216,23 @@ public class LockSettingsService extends ILockSettings.Stub {
     @GuardedBy("mSpManager")
     private long setLockCredentialWithSpLocked(LockscreenCredential credential,
             SyntheticPassword sp, int userId) {
+        if (mSecureAuthErasureStarted.get()) throw new IllegalStateException("Authentication unavailable");
+        List<SecureAuthDuressReservation.Identity> before = secureAuthNormalNamespace();
+        boolean refreshReservation = mSecureAuthDuressCredentials.reservationCovers(before);
+        if ((credential.isPin() || credential.isPassword())
+                && mSecureAuthDuressCredentials.matchesAfterNormalRejection(credential)) {
+            throw new IllegalArgumentException("Credential is reserved for duress");
+        }
+        UserInfo credentialUser = mUserManager.getUserInfo(userId);
+        boolean concealed = credentialUser != null
+                && UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(credentialUser.userType);
+        boolean protectedOwner = userId == UserHandle.USER_SYSTEM
+                && (mSecureAuthDuressCredentials.isConfigured()
+                    || mUserManager.getUsers().stream().anyMatch(user ->
+                        UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(user.userType)));
+        if ((concealed || protectedOwner) && !credential.isPin() && !credential.isPassword()) {
+            throw new IllegalArgumentException("Concealed entry requires a PIN or password");
+        }
         Slogf.i(TAG, "Changing lockscreen credential of user %d; newCredentialType=%s\n",
                 userId, LockPatternUtils.credentialTypeToString(credential.getType()));
         final int savedCredentialType = getCredentialTypeInternal(userId);
@@ -3480,6 +4282,9 @@ public class LockSettingsService extends ILockSettings.Stub {
                 "Successfully changed lockscreen credential of user %d to type %s",
                 userId,
                 LockPatternUtils.credentialTypeToString(credential.getType()));
+        if (refreshReservation) {
+            mSecureAuthDuressCredentials.refreshReservation(secureAuthNormalNamespace());
+        }
         return newProtectorId;
     }
 
@@ -4074,6 +4879,192 @@ public class LockSettingsService extends ILockSettings.Stub {
     }
 
     private final class LocalService extends LockSettingsInternal {
+        @Override
+        public SecureSpaceFingerprintOrigin captureSecureSpaceFingerprintOrigin(int userId) {
+            // A fresh doze scan may wake the device only after an eligible signed match.
+            // Capture the epoch first; an intervening screen-off still invalidates the grant.
+            if (mSecureAuthErasureStarted.get()
+                    || ActivityManager.getCurrentUser() != userId) return null;
+            UserInfo user = mUserManager.getUserInfo(userId);
+            if (!isSecureSpaceRoutingUser(user)) return null;
+            synchronized (mSpManager) {
+                return new SecureSpaceFingerprintOrigin(userId, user.serialNumber,
+                        mSecureSpaceForegroundGeneration.get(), mSecureSpaceSessionEpoch.get(),
+                        getCurrentLskfBasedProtectorId(userId));
+            }
+        }
+
+        @Override
+        public IBinder issueSecureSpaceFingerprintHandoff(SecureSpaceFingerprintIdentity destination,
+                SecureSpaceFingerprintOrigin originSnapshot, IBinder clientToken) {
+            if (destination == null || originSnapshot == null || clientToken == null
+                    || !clientToken.isBinderAlive()) {
+                Slog.w(TAG, "Fingerprint handoff input rejected");
+                return null;
+            }
+            int originUserId = originSnapshot.userId();
+            synchronized (mSecureSpaceCredentialLock) {
+                if (mSecureAuthErasureStarted.get() || !isSecureSpaceScreenInteractive()
+                        || ActivityManager.getCurrentUser() != originUserId) {
+                    Slog.w(TAG, "Fingerprint handoff foreground rejected: interactive="
+                            + isSecureSpaceScreenInteractive());
+                    return null;
+                }
+                UserInfo origin = mUserManager.getUserInfo(originUserId);
+                boolean originInvalid = !isSecureSpaceRoutingUser(origin);
+                boolean serialChanged = origin == null
+                        || origin.serialNumber != originSnapshot.serialNumber();
+                boolean foregroundChanged = mSecureSpaceForegroundGeneration.get()
+                        != originSnapshot.foregroundGeneration();
+                boolean sessionChanged = mSecureSpaceSessionEpoch.get()
+                        != originSnapshot.sessionEpoch();
+                boolean switchRestricted = origin != null
+                        && originUserId != destination.userId()
+                        && mUserManager.hasUserRestriction(UserManager.DISALLOW_USER_SWITCH,
+                                origin.getUserHandle());
+                if (originInvalid || serialChanged || foregroundChanged || sessionChanged
+                        || switchRestricted) {
+                    Slog.w(TAG, "Fingerprint handoff origin rejected: user=" + originInvalid
+                            + " serial=" + serialChanged + " foreground=" + foregroundChanged
+                            + " session=" + sessionChanged + " switch=" + switchRestricted);
+                    return null;
+                }
+                long foreground = mSecureSpaceForegroundGeneration.get();
+                long epoch = mSecureSpaceSessionEpoch.get();
+                synchronized (mSpManager) {
+                    SecureSpaceFingerprintIdentity current = getSecureSpaceFingerprintIdentity(destination.userId());
+                    if (current == null || !current.storageUnlocked() || !current.strongAuthAllowed()
+                            || current.serialNumber() != destination.serialNumber()
+                            || current.secureUserId() != destination.secureUserId()
+                            || current.protectorId() != destination.protectorId()) {
+                        Slog.w(TAG, "Fingerprint handoff destination rejected: identity="
+                                + (current != null) + " storage="
+                                + (current != null && current.storageUnlocked()) + " strongAuth="
+                                + (current != null && current.strongAuthAllowed()));
+                        return null;
+                    }
+                    if (getCurrentLskfBasedProtectorId(originUserId) != originSnapshot.protectorId()) {
+                        Slog.w(TAG, "Fingerprint handoff origin protector changed");
+                        return null;
+                    }
+                    int originType = getCredentialTypeInternal(originUserId);
+                    if (originType != CREDENTIAL_TYPE_PIN && originType != CREDENTIAL_TYPE_PASSWORD) {
+                        Slog.w(TAG, "Fingerprint handoff origin credential unavailable");
+                        return null;
+                    }
+                    SecureLockDeviceServiceInternal secureLock = LocalServices.getService(SecureLockDeviceServiceInternal.class);
+                    if (secureLock != null && secureLock.isSecureLockDeviceEnabled()) {
+                        Slog.w(TAG, "Fingerprint handoff secure lock active");
+                        return null;
+                    }
+                    IBinder token = new Binder();
+                    var grant = mSecureSpaceHandoff.issue(token,
+                            new SecureSpaceCredentialRouter.Candidate(origin.id, origin.serialNumber),
+                            new SecureSpaceCredentialRouter.Candidate(current.userId(), current.serialNumber()),
+                            getCurrentLskfBasedProtectorId(origin.id), current.protectorId(), foreground, epoch,
+                            mStrongAuth.getRequirementGeneration(current.userId()), SystemClock.elapsedRealtime());
+                    if (grant == null) {
+                        Slog.w(TAG, "Fingerprint handoff grant unavailable");
+                        return null;
+                    }
+                    java.util.concurrent.atomic.AtomicBoolean alive = new java.util.concurrent.atomic.AtomicBoolean(true);
+                    ISecureSpaceCredentialAttempt initialWitness = new ISecureSpaceCredentialAttempt.Stub() {
+                        @Override public boolean isActive() {
+                            return alive.get() && clientToken.isBinderAlive() && isSecureSpaceScreenInteractive();
+                        }
+                        @Override public void invalidate() { alive.set(false); }
+                    };
+                    SecureSpaceLease lease = new SecureSpaceLease(grant, initialWitness, true);
+                    revokeSecureSpaceLease(mSecureSpaceLease.getAndSet(lease));
+                    mSecureSpaceCredentialAttempt = initialWitness;
+                    mHandler.postDelayed(() -> {
+                        if (mSecureSpaceLease.compareAndSet(lease, null)) revokeSecureSpaceLease(lease);
+                    }, 30_000);
+                    if (!isSecureSpaceGrantIdentityCurrent(grant)
+                            || mSecureSpaceSessionEpoch.get() != epoch
+                            || mSecureSpaceForegroundGeneration.get() != foreground
+                            || ActivityManager.getCurrentUser() != origin.id) {
+                        revokeSecureSpaceLease(lease);
+                        mSecureSpaceHandoff.clear();
+                        Slog.w(TAG, "Fingerprint handoff grant became stale");
+                        return null;
+                    }
+                    return token;
+                }
+            }
+        }
+
+        @Override
+        public SecureSpaceFingerprintIdentity getSecureSpaceFingerprintIdentity(int userId) {
+            if (mSecureAuthErasureStarted.get()) return null;
+            UserInfo user = mUserManager.getUserInfo(userId);
+            if (user == null || !user.isFull() || user.partial || user.preCreated
+                    || !user.isEnabled() || (user.id != 0
+                        && !UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(user.userType))) return null;
+            synchronized (mSpManager) {
+                try {
+                    long sid = getGateKeeperService().getSecureUserId(userId);
+                    long protector = getCurrentLskfBasedProtectorId(userId);
+                    if (sid == 0 || protector == 0) return null;
+                    int type = getCredentialTypeInternal(userId);
+                    boolean entryType = type == CREDENTIAL_TYPE_PIN || type == CREDENTIAL_TYPE_PASSWORD;
+                    int disabled = mContext.getSystemService(DevicePolicyManager.class)
+                            .getKeyguardDisabledFeatures(null, userId);
+                    int biometricDefault = Settings.Secure.getIntForUser(
+                            mContext.getContentResolver(), Settings.Secure.BIOMETRIC_KEYGUARD_ENABLED,
+                            1, userId);
+                    boolean keyguardEnabled = Settings.Secure.getIntForUser(
+                            mContext.getContentResolver(), Settings.Secure.FINGERPRINT_KEYGUARD_ENABLED,
+                            biometricDefault == 1 ? 1 : 0, userId) != 0;
+                    boolean allowed = entryType && keyguardEnabled
+                            && mStrongAuthTracker.getStrongAuthForUser(userId) == 0
+                            && java.util.Objects.equals(mSecureSpacePrimaryGenerations.get(userId),
+                                    mStrongAuth.getRequirementGeneration(userId))
+                            && (disabled & DevicePolicyManager.KEYGUARD_DISABLE_FINGERPRINT) == 0;
+                    return new SecureSpaceFingerprintIdentity(userId, user.serialNumber, sid,
+                            protector, mUserManager.isUserUnlocked(userId), allowed);
+                } catch (RemoteException e) {
+                    return null;
+                }
+            }
+        }
+
+        private String fingerprintBindingKey(int sensorId, int fingerId) {
+            if (sensorId < 0 || fingerId == 0) throw new IllegalArgumentException("Invalid template identity");
+            return "secure_space_fingerprint_binding_" + sensorId + "_" + fingerId;
+        }
+        private String fingerprintBinding(SecureSpaceFingerprintIdentity identity) {
+            return identity.serialNumber() + ":" + Long.toHexString(identity.secureUserId());
+        }
+
+        @Override
+        public boolean isSecureSpaceFingerprintBindingCurrent(int sensorId, int fingerId,
+                SecureSpaceFingerprintIdentity identity) {
+            if (sensorId < 0 || fingerId == 0 || identity == null
+                    || mSecureAuthErasureStarted.get()) return false;
+            String stored = mStorage.getString(fingerprintBindingKey(sensorId, fingerId),
+                    null, identity.userId());
+            // Legacy Owner metadata is accepted only with its matching native signed SID.
+            return (stored == null && identity.userId() == 0)
+                    || fingerprintBinding(identity).equals(stored);
+        }
+
+        @Override
+        public boolean recordSecureSpaceFingerprintEnrollment(int sensorId, int fingerId,
+                SecureSpaceFingerprintIdentity identity) {
+            if (sensorId < 0 || fingerId == 0 || identity == null) return false;
+            synchronized (mSpManager) {
+                SecureSpaceFingerprintIdentity current = getSecureSpaceFingerprintIdentity(identity.userId());
+                if (current == null || !current.storageUnlocked()
+                        || current.serialNumber() != identity.serialNumber()
+                        || current.secureUserId() != identity.secureUserId()
+                        || current.protectorId() != identity.protectorId()) return false;
+                mStorage.setString(fingerprintBindingKey(sensorId, fingerId),
+                        fingerprintBinding(current), identity.userId());
+                return true;
+            }
+        }
+
         @Override
         public void disableSecureLockDevice(int userId, boolean authenticationComplete) {
             mStrongAuth.disableSecureLockDevice(userId, authenticationComplete);

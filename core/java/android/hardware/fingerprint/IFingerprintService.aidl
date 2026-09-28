@@ -222,4 +222,6 @@ interface IFingerprintService {
     // Ensures that the scheduler is not stuck.
     @EnforcePermission("USE_BIOMETRIC_INTERNAL")
     oneway void scheduleWatchdog();
+    // Trusted keyguard-only union availability; no public user/template metadata.
+    boolean hasSecureSpaceRoutingCandidate(String opPackageName);
 }

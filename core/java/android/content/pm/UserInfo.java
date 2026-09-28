@@ -517,12 +517,14 @@ public class UserInfo implements Parcelable {
      * <p>This method checks if {@link #supportsSwitchTo()} is true AND the user is a full user.
      * It specifically excludes the headless system user, as switching to that user
      * is typically a framework-level operation and not available via the usual switcher UIs.
+     * Concealed Secure Spaces are likewise excluded from public switcher presentation.
      *
      * @hide
      */
     @android.ravenwood.annotation.RavenwoodThrow
     public boolean isUiSwitchableHumanUser() {
-        return supportsSwitchTo() && isFull();
+        return supportsSwitchTo() && isFull()
+                && !UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(userType);
     }
 
     /**

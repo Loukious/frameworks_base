@@ -169,6 +169,14 @@ public class FingerprintCallback {
     /**
      * Propagate authentication failed via the callback.
      */
+    public void sendSecureSpaceAuthenticationSucceeded(android.os.IBinder token, int originUserId,
+            int originSerial, int destinationUserId, int destinationSerial, boolean strongBiometric) {
+        if (mAuthenticationCallback != null) {
+            mAuthenticationCallback.onSecureSpaceAuthenticationSucceeded(token, originUserId,
+                    originSerial, destinationUserId, destinationSerial, strongBiometric);
+        }
+    }
+
     public void sendAuthenticatedFailed() {
         if (mAuthenticationCallback != null) {
             mAuthenticationCallback.onAuthenticationFailed();

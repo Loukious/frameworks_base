@@ -323,6 +323,12 @@ public abstract class UserManagerInternal {
     public abstract int[] getUserIds();
 
     /**
+     * Snapshot of every registered ID for cryptographic erasure, including partial, dying and
+     * pre-created users. Never use this for public presentation or authentication eligibility.
+     */
+    public abstract int[] getUserIdsForKeyErasure();
+
+    /**
      * Internal implementation of getUsers does not check permissions.
      * This improves performance for calls from inside system server which already have permissions
      * checked.

@@ -16,6 +16,7 @@
 
 package com.android.systemui.keyguard.domain.interactor
 
+import com.android.systemui.bouncer.domain.interactor.primaryBouncerInteractor
 import com.android.systemui.communal.domain.interactor.communalSceneInteractor
 import com.android.systemui.communal.domain.interactor.communalSettingsInteractor
 import com.android.systemui.keyguard.data.repository.keyguardTransitionRepository
@@ -42,5 +43,6 @@ var Kosmos.fromLockscreenTransitionInteractor by
             swipeToDismissInteractor = swipeToDismissInteractor,
             keyguardOcclusionInteractor = keyguardOcclusionInteractor,
             communalSceneInteractor = communalSceneInteractor,
+            primaryBouncerInteractor = primaryBouncerInteractor,
         )
     }

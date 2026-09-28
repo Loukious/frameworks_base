@@ -149,6 +149,24 @@ public class AdminSecondaryLockScreenControllerTest extends SysuiTestCase {
     }
 
     @Test
+    public void testShow_bindsServiceAsDestinationUser() {
+        android.testing.TestableContext context = spy(mContext);
+        when(mSelectedUserInteractor.getSelectedUserId()).thenReturn(10);
+        AdminSecondaryLockScreenController controller =
+                new AdminSecondaryLockScreenController.Factory(context,
+                        mKeyguardSecurityContainer, mUpdateMonitor, mHandler,
+                        mSelectedUserInteractor).create(mKeyguardCallback);
+
+        controller.show(mServiceIntent);
+
+        verify(context).bindServiceAsUser(org.mockito.ArgumentMatchers.eq(mServiceIntent),
+                any(android.content.ServiceConnection.class),
+                org.mockito.ArgumentMatchers.eq(android.content.Context.BIND_AUTO_CREATE),
+                org.mockito.ArgumentMatchers.eq(android.os.UserHandle.of(10)));
+        controller.hide();
+    }
+
+    @Test
     public void testHide() throws Exception {
         // Show the view first, then hide.
         doAnswer(invocation -> {

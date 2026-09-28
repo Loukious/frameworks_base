@@ -18,6 +18,8 @@ package com.android.server.biometrics.sensors.fingerprint.aidl;
 
 import android.annotation.NonNull;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.hardware.biometrics.IInvalidationCallback;
 import android.hardware.fingerprint.Fingerprint;
 import android.os.RemoteException;
@@ -39,6 +41,19 @@ public class FingerprintInvalidationClient extends InvalidationClient<Fingerprin
             @NonNull Map<Integer, Long> authenticatorIds, @NonNull IInvalidationCallback callback) {
         super(context, lazyDaemon, userId, sensorId, logger, biometricContext,
                 authenticatorIds, callback);
+        mSharedAuthenticatorIds = authenticatorIds;
+    }
+
+    private final Map<Integer, Long> mSharedAuthenticatorIds;
+
+    @Override
+    public void onAuthenticatorIdInvalidated(long id) {
+        SecureSpaceFingerprintPool.updateAuthenticatorIds(getContext(), getSensorId(),
+                getTargetUserId(), id, mSharedAuthenticatorIds);
+        super.onAuthenticatorIdInvalidated(id);
+        // The superclass updates only the logical user; restore the empty-user zero value.
+        SecureSpaceFingerprintPool.updateAuthenticatorIds(getContext(), getSensorId(),
+                getTargetUserId(), id, mSharedAuthenticatorIds);
     }
 
     @Override

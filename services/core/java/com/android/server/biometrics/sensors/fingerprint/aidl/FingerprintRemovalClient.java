@@ -19,6 +19,8 @@ package com.android.server.biometrics.sensors.fingerprint.aidl;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.hardware.fingerprint.Fingerprint;
 import android.os.IBinder;
 import android.os.RemoteException;
@@ -41,6 +43,7 @@ public class FingerprintRemovalClient extends RemovalClient<Fingerprint, AidlSes
     private static final String TAG = "FingerprintRemovalClient";
 
     private final int[] mBiometricIds;
+    private final int mRemovalReason;
 
     public FingerprintRemovalClient(@NonNull Context context,
             @NonNull Supplier<AidlSession> lazyDaemon, @NonNull IBinder token,
@@ -50,16 +53,48 @@ public class FingerprintRemovalClient extends RemovalClient<Fingerprint, AidlSes
             @NonNull Map<Integer, Long> authenticatorIds, int reason) {
         super(context, lazyDaemon, token, listener, userId, owner, utils, sensorId,
                 logger, biometricContext, authenticatorIds, reason);
-        mBiometricIds = biometricIds;
+        mBiometricIds = biometricIds.clone();
+        mRemovalReason = reason;
     }
 
     @Override
     protected void startHalOperation() {
+        if (SecureSpaceFingerprintPool.isSharedUser(getContext(), getTargetUserId())) {
+            if (SecureSpaceFingerprintPool.hasUnreadableMetadata(getContext(), getSensorId())) {
+                rejectRemoval();
+                return;
+            }
+            boolean cleanup = mRemovalReason == android.hardware.biometrics.BiometricsProtoEnums
+                    .UNENROLL_REASON_DANGLING_HAL;
+            for (int id : mBiometricIds) {
+                boolean allowed = id > 0 && (cleanup
+                        ? SecureSpaceFingerprintPool.allTemplates(getContext(), getSensorId())
+                                .stream().noneMatch(f -> f.getBiometricId() == id)
+                        : SecureSpaceFingerprintPool.ownsUniqueTemplate(getContext(),
+                                getSensorId(), getTargetUserId(), id));
+                if (!allowed) {
+                    rejectRemoval();
+                    return;
+                }
+            }
+        }
         try {
             getFreshDaemon().getSession().removeEnrollments(mBiometricIds);
         } catch (RemoteException e) {
             Slog.e(TAG, "Remote exception when requesting remove", e);
             mCallback.onClientFinished(this, false /* success */);
         }
+    }
+    private void rejectRemoval() {
+        try {
+            if (getListener() != null) {
+                getListener().onError(getSensorId(), getCookie(),
+                        android.hardware.biometrics.BiometricConstants
+                                .BIOMETRIC_ERROR_UNABLE_TO_PROCESS, 0);
+            }
+        } catch (RemoteException ignored) {
+            Slog.w(TAG, "Fingerprint removal receiver disconnected");
+        }
+        mCallback.onClientFinished(this, false);
     }
 }

@@ -16,6 +16,7 @@
 
 package com.android.systemui.bouncer.ui.viewmodel
 
+import com.android.compose.animation.scene.ObservableTransitionState
 import android.app.admin.DevicePolicyManager
 import android.app.admin.DevicePolicyResources
 import android.content.Context
@@ -246,6 +247,18 @@ constructor(
     override suspend fun onActivated(): Nothing {
         bouncerInteractor.resetScale()
         coroutineScope {
+            launch {
+                sceneInteractor.transitionStateFlow.collectLatest { transition ->
+                    if (transition is ObservableTransitionState.Transition
+                        && transition.fromContent == Overlays.Bouncer
+                        && transition.toContent != Overlays.Bouncer
+                        && transition.isInitiatedByUserInput) {
+                        transition.progress.collect { progress ->
+                            if (progress > 0f) bouncerInteractor.cancelSecureSpaceEntry()
+                        }
+                    }
+                }
+            }
             launch { message.activate() }
             launch {
                 snapshotFlow { authMethodViewModel }
@@ -535,6 +548,15 @@ constructor(
     /**
      * Notifies that the bouncer UI has been destroyed (e.g. the composable left the composition).
      */
+    val secondaryPolicyVisible = bouncerInteractor.secondaryPolicyVisible
+
+    fun registerSecondaryPolicyHost(host: androidx.constraintlayout.widget.ConstraintLayout) {
+        bouncerInteractor.registerSecondaryPolicyHost(host)
+    }
+    fun unregisterSecondaryPolicyHost(host: androidx.constraintlayout.widget.ConstraintLayout) {
+        bouncerInteractor.unregisterSecondaryPolicyHost(host)
+    }
+
     fun onUiDestroyed() {
         keyguardDismissActionInteractor.clearDismissAction()
     }
@@ -544,6 +566,7 @@ constructor(
      * `shouldSignOutOnGoBack()`.
      */
     fun onGoBack() {
+        bouncerInteractor.cancelSecureSpaceEntry()
         enqueueOnActivatedScope {
             if (shouldSignOutOnGoBack()) {
                 userLogoutInteractor.logOutToSystemUser()

@@ -1144,6 +1144,13 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
     @Override
     public void onStartedWakingUp() {
         mIsSleeping = false;
+        // A wake can interrupt going-to-sleep before onFinishedGoingToSleep() gets a chance to
+        // clear the previous keyguard dismissal. Leaving that disappear runnable pending makes
+        // beginShowingBouncer() reject every later swipe even though the transition framework has
+        // already moved back to LOCKSCREEN.
+        if (!SceneContainerFlag.isEnabled() && mPrimaryBouncerInteractor.isAnimatingAway()) {
+            mPrimaryBouncerInteractor.hide();
+        }
         setRootViewAnimationDisabled(false);
         NavigationBarView navBarView = mCentralSurfaces.getNavigationBarView();
         if (navBarView != null) {

@@ -273,6 +273,23 @@ public class UserControllerTest {
 
 
     @Test
+    public void switchToSecureSpace_skipsNamedDialog_butStartsNativeSwitch() {
+        setUpUser(TEST_USER_ID, DEFAULT_USER_FLAGS, false,
+                UserManager.USER_TYPE_FULL_SECURE_SPACE);
+        mUserController.setInitialConfig(true, 3, false, -1, false, false);
+        mInjector.mHandler.mRunCallbacksImmediately = false;
+
+        assertTrue(mUserController.switchUser(TEST_USER_ID));
+
+        assertThat(mInjector.mHandler.getMessageCodes()).contains(
+                UserController.START_USER_SWITCH_FG_MSG);
+        assertThat(mInjector.mUiHandler.getMessageCodes()).doesNotContain(
+                UserController.START_USER_SWITCH_UI_MSG);
+        verify(mInjector, never()).showUserSwitchingDialog(
+                any(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
     public void testStartUser_foreground() {
         mInjector.mHandler.mRunCallbacksImmediately = false;
         mUserController.startUser(TEST_USER_ID, USER_START_MODE_FOREGROUND);

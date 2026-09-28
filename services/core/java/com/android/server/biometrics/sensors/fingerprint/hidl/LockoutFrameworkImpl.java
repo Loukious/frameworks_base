@@ -24,6 +24,7 @@ import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Handler;
@@ -127,9 +128,9 @@ public class LockoutFrameworkImpl implements LockoutTracker {
                     + ", clearAttemptCounter: " + clearAttemptCounter);
         }
         if (clearAttemptCounter) {
-            mFailedAttempts.put(userId, 0);
+            mFailedAttempts.put(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId), 0);
         }
-        mTimedLockoutCleared.put(userId, true);
+        mTimedLockoutCleared.put(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId), true);
         // If we're asked to reset failed attempts externally (i.e. from Keyguard),
         // the alarm might still be pending; remove it.
         cancelLockoutResetForUser(userId);
@@ -142,8 +143,8 @@ public class LockoutFrameworkImpl implements LockoutTracker {
                 Settings.System.FINGERPRINT_LOCKOUT, 0) == 1) {
             return;
         }
-        mFailedAttempts.put(userId, mFailedAttempts.get(userId, 0) + 1);
-        mTimedLockoutCleared.put(userId, false);
+        mFailedAttempts.put(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId), mFailedAttempts.get(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId), 0) + 1);
+        mTimedLockoutCleared.put(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId), false);
 
         if (getLockoutModeForUser(userId) != LOCKOUT_NONE) {
             scheduleLockoutResetForUser(userId);
@@ -157,11 +158,11 @@ public class LockoutFrameworkImpl implements LockoutTracker {
                 Settings.System.FINGERPRINT_LOCKOUT, 0) == 1) {
             return LOCKOUT_NONE;
         }
-        final int failedAttempts = mFailedAttempts.get(userId, 0);
+        final int failedAttempts = mFailedAttempts.get(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId), 0);
         if (failedAttempts >= MAX_FAILED_ATTEMPTS_LOCKOUT_PERMANENT) {
             return LOCKOUT_PERMANENT;
         } else if (failedAttempts > 0
-                && !mTimedLockoutCleared.get(userId, false)
+                && !mTimedLockoutCleared.get(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId), false)
                 && (failedAttempts % MAX_FAILED_ATTEMPTS_LOCKOUT_TIMED == 0)) {
             return LOCKOUT_TIMED;
         }
@@ -172,14 +173,14 @@ public class LockoutFrameworkImpl implements LockoutTracker {
     public void setLockoutModeForUser(int userId, int mode) {}
 
     private void cancelLockoutResetForUser(int userId) {
-        mAlarmManager.cancel(mLockoutResetIntent.apply(userId));
+        mAlarmManager.cancel(mLockoutResetIntent.apply(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId)));
     }
 
     private void scheduleLockoutResetForUser(int userId) {
         mHandler.post(() -> {
             mAlarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP,
                     SystemClock.elapsedRealtime() + FAIL_LOCKOUT_TIMEOUT_MS,
-                    mLockoutResetIntent.apply(userId));
+                    mLockoutResetIntent.apply(SecureSpaceFingerprintPool.hardwareUserId(mContext, userId)));
         });
     }
 }

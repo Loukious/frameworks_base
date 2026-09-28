@@ -2562,8 +2562,11 @@ class UserController implements Handler.Callback {
             ActivityManager.invalidateGetCurrentUserIdCache();
             userSwitchUiEnabled = mUserSwitchUiEnabled;
         }
+        UserInfo currentUserInfo = getUserInfo(currentUserId);
+        // UserSwitchingDialog anonymizes transitions involving concealed Secure Spaces. Keep the
+        // full-screen switch cover so framework/keyguard churn is hidden without exposing either
+        // space's identity.
         if (userSwitchUiEnabled) {
-            UserInfo currentUserInfo = getUserInfo(currentUserId);
             Pair<UserInfo, UserInfo> userNames = new Pair<>(currentUserInfo, targetUserInfo);
             mUiHandler.removeMessages(START_USER_SWITCH_UI_MSG);
             mUiHandler.sendMessage(mUiHandler.obtainMessage(

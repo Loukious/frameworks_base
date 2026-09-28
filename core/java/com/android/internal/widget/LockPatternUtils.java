@@ -52,6 +52,7 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.os.IBinder;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.os.storage.StorageManager;
@@ -553,6 +554,126 @@ public class LockPatternUtils {
         }
     }
 
+    /**
+     * Checks a concealed-entry credential against the current owner/secure-space cohort.
+     * No early-match callback is delivered. Native per-user throttles remain in force.
+     * The caller must separately coordinate a verified user switch and keyguard dismissal.
+     */
+    public SecureSpaceCredentialResponse checkSecureSpaceCredential(
+            @NonNull LockscreenCredential credential, int expectedUserId,
+            int expectedSerialNumber, @NonNull ISecureSpaceCredentialAttempt attempt) {
+        throwIfCalledOnMainThread();
+        try {
+            return requireNonNullElse(getLockSettings().checkSecureSpaceCredential(
+                    credential, expectedUserId, expectedSerialNumber, attempt),
+                    SecureSpaceCredentialResponse.unavailable());
+        } catch (RemoteException e) {
+            return SecureSpaceCredentialResponse.unavailable();
+        }
+    }
+
+    /** Sets an unconfigured Space's first native PIN/password after fresh owner verification. */
+    public boolean setInitialSecureSpaceCredential(@NonNull LockscreenCredential ownerCredential,
+            @NonNull LockscreenCredential credential, int userId, int serialNumber) {
+        throwIfCalledOnMainThread();
+        try {
+            return getLockSettings().setInitialSecureSpaceCredential(
+                    ownerCredential, credential, userId, serialNumber);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /** Sets or disables dedicated duress verifiers after fresh native owner verification. */
+    public void setSecureAuthDuressCredentials(@NonNull LockscreenCredential ownerCredential,
+            @NonNull LockscreenCredential pin, @NonNull LockscreenCredential password) {
+        throwIfCalledOnMainThread();
+        try {
+            getLockSettings().setSecureAuthDuressCredentials(ownerCredential, pin, password);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /** Protected duress-status disclosure; requires the owner's current native credential. */
+    public boolean hasSecureAuthDuressCredentials(@NonNull LockscreenCredential ownerCredential) {
+        throwIfCalledOnMainThread();
+        try {
+            return getLockSettings().hasSecureAuthDuressCredentials(ownerCredential);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+
+    /** Prepares a one-use match for a deliberate user switch; does not switch or dismiss. */
+    public boolean prepareSecureSpaceCredentialHandoff(@NonNull IBinder token) {
+        throwIfCalledOnMainThread();
+        try {
+            return getLockSettings().prepareSecureSpaceCredentialHandoff(token);
+        } catch (RemoteException e) {
+            return false;
+        }
+    }
+
+    /** Revalidates a prepared match for the selected destination immediately before completion. */
+    public boolean consumeSecureSpaceCredentialHandoff(@NonNull IBinder token,
+            int userId, int serialNumber) {
+        throwIfCalledOnMainThread();
+        try {
+            return getLockSettings().consumeSecureSpaceCredentialHandoff(token, userId, serialNumber);
+        } catch (RemoteException e) {
+            return false;
+        }
+    }
+
+    public boolean attachSecureSpaceFingerprintWitness(IBinder token, int originUserId,
+            int originSerial, int destinationUserId, int destinationSerial,
+            ISecureSpaceCredentialAttempt witness) {
+        throwIfCalledOnMainThread();
+        try {
+            return getLockSettings().attachSecureSpaceFingerprintWitness(token, originUserId,
+                    originSerial, destinationUserId, destinationSerial, witness);
+        } catch (RemoteException e) { return false; }
+    }
+
+    public boolean consumeSecureSpaceFingerprintHandoff(IBinder token, int userId, int serialNumber) {
+        throwIfCalledOnMainThread();
+        try {
+            return getLockSettings().consumeSecureSpaceFingerprintHandoff(token, userId, serialNumber);
+        } catch (RemoteException e) { return false; }
+    }
+
+    /** Read-only shutdown fence for trusted keyguard clients. */
+    public boolean isSecureAuthErasurePending() {
+        try {
+            return getLockSettings().isSecureAuthErasurePending();
+        } catch (RemoteException e) {
+            // A dead system_server cannot authorize further keyguard completion.
+            return true;
+        }
+    }
+
+    /** Fast native lease validation, including revocations whose callback was not delivered. */
+    public boolean isSecureSpaceAuthenticationLeaseCurrent(@NonNull IBinder token,
+            int userId, int serialNumber) {
+        try {
+            return getLockSettings().isSecureSpaceAuthenticationLeaseCurrent(
+                    token, userId, serialNumber);
+        } catch (RemoteException e) {
+            return false;
+        }
+    }
+
+    /** Cancels this capability without affecting a later attempt's capability. */
+    public void cancelSecureSpaceCredentialHandoff(@NonNull IBinder token) {
+        throwIfCalledOnMainThread();
+        try {
+            getLockSettings().cancelSecureSpaceCredentialHandoff(token);
+        } catch (RemoteException e) {
+            // The client must still invalidate its local bouncer session.
+        }
+    }
 
     /**
      * Check if the credential of a managed profile with unified challenge matches. In this context,

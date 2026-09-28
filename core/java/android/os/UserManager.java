@@ -155,6 +155,13 @@ public class UserManager {
     public static final String USER_TYPE_FULL_SECONDARY = "android.os.usertype.full.SECONDARY";
 
     /**
+     * Full secondary user managed by Secure Spaces. Credentials and storage remain per-user.
+     * @hide
+     */
+    public static final String USER_TYPE_FULL_SECURE_SPACE =
+            "android.os.usertype.full.SECURE_SPACE";
+
+    /**
      * User type representing a guest user that may be transient.
      * @hide
      */

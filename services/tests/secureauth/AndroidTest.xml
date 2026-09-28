@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configuration description="All-user key-erasure sequencing with an inert backend.">
+    <option name="test-suite-tag" value="general-tests" />
+    <test class="com.android.tradefed.testtype.HostTest">
+        <option name="jar" value="SecureAuthKeyErasureTests.jar" />
+        <option name="class" value="com.android.server.recoverysystem.SecureAuthKeyErasureTest" />
+    </test>
+</configuration>

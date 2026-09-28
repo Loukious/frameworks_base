@@ -141,6 +141,14 @@ constructor(
         // SceneInteractor#changeScene(Scenes.Bouncer, ...).
         SceneContainerFlag.assertInLegacyMode()
 
+        Log.i(
+            TAG,
+            "show entry reason=$reason showing=${isBouncerShowing()} showingSoon=" +
+                repository.primaryBouncerShowingSoon.value + " delegate=" +
+                (primaryBouncerView.delegate != null) + " animatingAway=" +
+                repository.isPrimaryBouncerStartingDisappearAnimation(),
+        )
+
         if (primaryBouncerView.delegate == null && !Flags.composeBouncer()) {
             Log.d(
                 TAG,

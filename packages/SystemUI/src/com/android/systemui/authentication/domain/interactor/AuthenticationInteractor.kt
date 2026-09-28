@@ -48,7 +48,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -259,15 +261,23 @@ constructor(
             throw IllegalArgumentException("Input was empty!")
         }
 
+        val attemptUserId = selectedUserInteractor.getSelectedUserId()
         val authMethod = authenticationMethod.value
         if (shouldSkipAuthenticationAttempt(authMethod, tryAutoConfirm, input.size)) {
             if (lockscreenIndicateDuplicateGuesses() && !tryAutoConfirm) {
                 // skips during auto confirm do not appear to be attempts from a user perspective
                 repository.reportAuthenticationAttempt(
                     AuthenticationResult.SKIPPED,
+                    userId = attemptUserId,
                     isDuplicate = false,
                 )
             }
+            return AuthenticationResult.SKIPPED
+        }
+
+        // Skip inputs collected for a user that changed while checking auto-confirm/lockout.
+        currentCoroutineContext().ensureActive()
+        if (selectedUserInteractor.getSelectedUserId() != attemptUserId) {
             return AuthenticationResult.SKIPPED
         }
 
@@ -276,25 +286,50 @@ constructor(
         latencyTracker.onActionStart(LatencyTracker.ACTION_CHECK_CREDENTIAL)
         latencyTracker.onActionStart(LatencyTracker.ACTION_CHECK_CREDENTIAL_UNLOCKED)
         try {
-            var successEmitted = false
             val authenticationResult =
-                repository.checkCredential(credential) {
+                repository.checkCredential(credential, attemptUserId) {
+                    // Early matching is a latency signal only. A user may switch or cancel while
+                    // the full verifier result is still pending; it must not dismiss Keyguard.
                     latencyTracker.onActionEnd(LatencyTracker.ACTION_CHECK_CREDENTIAL)
-                    if (!successEmitted) {
-                        successEmitted = true
-                        notifyOnAuthResultListeners(true)
-                    }
                 }
             credential.zeroize()
+            currentCoroutineContext().ensureActive()
+            if (authenticationResult.isHandoffPending || authenticationResult.isInconclusive) {
+                latencyTracker.onActionEnd(LatencyTracker.ACTION_CHECK_CREDENTIAL)
+                latencyTracker.onActionEnd(LatencyTracker.ACTION_CHECK_CREDENTIAL_UNLOCKED)
+                return if (authenticationResult.isHandoffPending) {
+                    AuthenticationResult.HANDOFF_PENDING
+                } else {
+                    // A union retry is not a verified wrong credential: show its countdown
+                    // without incrementing the originating user's policy failure counter.
+                    if (authenticationResult.lockoutDuration.isPositive()) {
+                        repository.reportLockoutStarted(authenticationResult.lockoutDuration,
+                            authenticationResult.checkedUserId)
+                        currentCoroutineContext().ensureActive()
+                        if (selectedUserInteractor.getSelectedUserId() != attemptUserId) {
+                            return AuthenticationResult.SKIPPED
+                        }
+                        notifyOnAuthResultListeners(false)
+                        AuthenticationResult.FAILED
+                    } else AuthenticationResult.SKIPPED
+                }
+            }
+            check(authenticationResult.checkedUserId == attemptUserId) {
+                "Credential result has a different user identity"
+            }
 
             if (authenticationResult.isSuccessful) {
                 latencyTracker.onActionEnd(LatencyTracker.ACTION_CHECK_CREDENTIAL_UNLOCKED)
-                repository.reportAuthenticationAttempt(AuthenticationResult.SUCCEEDED)
-                latencyTracker.onActionStart(LatencyTracker.ACTION_LOCKSCREEN_UNLOCK)
-                if (!successEmitted) {
-                    successEmitted = true
-                    notifyOnAuthResultListeners(true)
+                repository.reportAuthenticationAttempt(
+                    AuthenticationResult.SUCCEEDED,
+                    userId = authenticationResult.matchedUserId!!,
+                )
+                currentCoroutineContext().ensureActive()
+                if (selectedUserInteractor.getSelectedUserId() != attemptUserId) {
+                    return AuthenticationResult.SKIPPED
                 }
+                latencyTracker.onActionStart(LatencyTracker.ACTION_LOCKSCREEN_UNLOCK)
+                notifyOnAuthResultListeners(true)
 
                 // Force a garbage collection in an attempt to erase any credentials left in memory.
                 // Do it after a 5-sec delay to avoid making the bouncer dismiss animation janky.
@@ -306,20 +341,30 @@ constructor(
             // Authentication failed.
             repository.reportAuthenticationAttempt(
                 AuthenticationResult.FAILED,
-                authenticationResult.isDuplicate,
+                userId = authenticationResult.checkedUserId,
+                isDuplicate = authenticationResult.isDuplicate,
             )
 
             if (authenticationResult.lockoutDuration.isPositive()) {
                 // Lockout has been triggered.
-                repository.reportLockoutStarted(authenticationResult.lockoutDuration)
+                repository.reportLockoutStarted(
+                    authenticationResult.lockoutDuration,
+                    authenticationResult.checkedUserId,
+                )
             }
 
+            currentCoroutineContext().ensureActive()
+            if (selectedUserInteractor.getSelectedUserId() != attemptUserId) {
+                return AuthenticationResult.SKIPPED
+            }
             notifyOnAuthResultListeners(false)
             return AuthenticationResult.FAILED
         } catch (ex: CancellationException) {
             // The authentication action has been cancelled, likely due to the user leaving the UI.
             latencyTracker.onActionEnd(LatencyTracker.ACTION_CHECK_CREDENTIAL_UNLOCKED)
             throw ex
+        } finally {
+            credential.zeroize()
         }
     }
 
@@ -421,7 +466,7 @@ constructor(
                     input
                         .map { it as AuthenticationPatternCoordinate }
                         .map { LockPatternView.Cell.of(it.y, it.x, patternSize.value) },
-                    patternSize.value
+                    patternSize.value,
                 )
             else -> null
         }

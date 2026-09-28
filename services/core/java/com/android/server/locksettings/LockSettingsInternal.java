@@ -30,6 +30,27 @@ import java.lang.annotation.RetentionPolicy;
  * LockSettingsService local system service interface.
  */
 public abstract class LockSettingsInternal {
+    public record SecureSpaceFingerprintIdentity(int userId, int serialNumber,
+            long secureUserId, long protectorId, boolean storageUnlocked,
+            boolean strongAuthAllowed) {}
+
+    /** In-process native identities; these APIs accept no caller-supplied HAT for routing. */
+    public SecureSpaceFingerprintIdentity getSecureSpaceFingerprintIdentity(int userId) {
+        return null;
+    }
+    public boolean isSecureSpaceFingerprintBindingCurrent(int sensorId, int fingerId,
+            SecureSpaceFingerprintIdentity identity) { return false; }
+    public boolean recordSecureSpaceFingerprintEnrollment(int sensorId, int fingerId,
+            SecureSpaceFingerprintIdentity identity) { return false; }
+
+    public record SecureSpaceFingerprintOrigin(int userId, int serialNumber,
+            long foregroundGeneration, long sessionEpoch, long protectorId) {}
+    public SecureSpaceFingerprintOrigin captureSecureSpaceFingerprintOrigin(int userId) { return null; }
+
+    public android.os.IBinder issueSecureSpaceFingerprintHandoff(
+            SecureSpaceFingerprintIdentity destination, SecureSpaceFingerprintOrigin originSnapshot,
+            android.os.IBinder clientToken) { return null; }
+
     /** ErrorCode for armRebootEscrow failures. **/
     @IntDef(prefix = {"ARM_REBOOT_ERROR_"}, value = {
             ARM_REBOOT_ERROR_NONE,

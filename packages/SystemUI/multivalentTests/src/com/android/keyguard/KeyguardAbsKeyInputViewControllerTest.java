@@ -19,6 +19,7 @@ package com.android.keyguard;
 import static com.google.common.truth.Truth.assertThat;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -39,6 +40,9 @@ import androidx.test.filters.SmallTest;
 
 import com.android.internal.util.LatencyTracker;
 import com.android.internal.widget.LockPatternUtils;
+import com.android.internal.widget.LockPatternChecker;
+import com.android.internal.widget.LockscreenCredential;
+import com.android.internal.widget.VerifyCredentialResponse;
 import com.android.keyguard.KeyguardAbsKeyInputView.KeyDownListener;
 import com.android.keyguard.KeyguardSecurityModel.SecurityMode;
 import com.android.systemui.Flags;
@@ -149,6 +153,44 @@ public class KeyguardAbsKeyInputViewControllerTest extends SysuiTestCase {
                 return 0;
             }
         };
+    }
+
+    private LockPatternChecker.OnCheckCallback beginCredentialCheck(String input) {
+        when(mAbsKeyInputView.getEnteredCredential())
+                .thenReturn(LockscreenCredential.createPin(input));
+        mKeyguardAbsKeyInputViewController.onResume(0);
+        mKeyguardAbsKeyInputViewController.verifyPasswordAndUnlock();
+        ArgumentCaptor<LockPatternChecker.OnCheckCallback> callback =
+                ArgumentCaptor.forClass(LockPatternChecker.OnCheckCallback.class);
+        verify(mLockPatternCheckerWrapper).checkCredential(
+                eq(mLockPatternUtils), any(), eq(0), callback.capture());
+        return callback.getValue();
+    }
+
+    @Test
+    public void earlyMatchWaitsForCompletedVerification() {
+        LockPatternChecker.OnCheckCallback callback = beginCredentialCheck("3456");
+        callback.onEarlyMatched();
+        verify(mKeyguardSecurityCallback, never()).dismiss(anyBoolean(), anyInt(), any());
+        callback.onChecked(VerifyCredentialResponse.OK);
+        verify(mKeyguardSecurityCallback).dismiss(true, 0, mSecurityMode);
+    }
+
+    @Test
+    public void pausedCheckCannotDismissAfterEarlyMatch() {
+        LockPatternChecker.OnCheckCallback callback = beginCredentialCheck("3456");
+        callback.onEarlyMatched();
+        mKeyguardAbsKeyInputViewController.onPause();
+        callback.onChecked(VerifyCredentialResponse.OK);
+        verify(mKeyguardSecurityCallback, never()).dismiss(anyBoolean(), anyInt(), any());
+    }
+
+    @Test
+    public void changedUserCannotReceiveCompletedMatch() {
+        LockPatternChecker.OnCheckCallback callback = beginCredentialCheck("3456");
+        when(mSelectedUserInteractor.getSelectedUserId()).thenReturn(10);
+        callback.onChecked(VerifyCredentialResponse.OK);
+        verify(mKeyguardSecurityCallback, never()).dismiss(anyBoolean(), anyInt(), any());
     }
 
     @Test

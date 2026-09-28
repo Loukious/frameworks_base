@@ -108,6 +108,21 @@ public class LockSettingsStrongAuth {
     private final int mDefaultStrongAuthFlags;
     private final boolean mDefaultIsNonStrongBiometricAllowed = true;
 
+    private final SecureSpaceCredentialHandoff.RequirementGenerations mRequirementGenerations =
+            new SecureSpaceCredentialHandoff.RequirementGenerations();
+
+    interface RequirementListener {
+        void onRequired(int reason, int userId, boolean beginsRequirement);
+    }
+    private volatile RequirementListener mRequirementListener;
+    void setRequirementListener(RequirementListener listener) {
+        mRequirementListener = listener;
+    }
+
+    long getRequirementGeneration(int userId) {
+        return mRequirementGenerations.get(userId);
+    }
+
     private final Context mContext;
     private final Injector mInjector;
     private final AlarmManager mAlarmManager;
@@ -205,6 +220,11 @@ public class LockSettingsStrongAuth {
     }
 
     private void handleRequireStrongAuthOneUser(int strongAuthReason, int userId) {
+        mRequirementGenerations.require(strongAuthReason, userId);
+        RequirementListener listener = mRequirementListener;
+        if (strongAuthReason != 0 && listener != null) {
+            listener.onRequired(strongAuthReason, userId, false);
+        }
         // If requiring strong biometric auth for Secure Lock Device, disallow non-strong
         // biometrics
         if (secureLockDevice()
@@ -587,6 +607,12 @@ public class LockSettingsStrongAuth {
 
     public void requireStrongAuth(int strongAuthReason, int userId) {
         if (userId == UserHandle.USER_ALL || userId >= UserHandle.USER_SYSTEM) {
+            // Invalidate pending proofs immediately, before the handler processes the request.
+            mRequirementGenerations.require(strongAuthReason, userId);
+            RequirementListener listener = mRequirementListener;
+            if (strongAuthReason != 0 && listener != null) {
+                listener.onRequired(strongAuthReason, userId, true);
+            }
             mHandler.obtainMessage(MSG_REQUIRE_STRONG_AUTH, strongAuthReason,
                     userId).sendToTarget();
         } else {

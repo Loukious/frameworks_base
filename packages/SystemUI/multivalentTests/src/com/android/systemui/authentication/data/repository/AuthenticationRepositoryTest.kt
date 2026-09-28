@@ -27,6 +27,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SmallTest
 import com.android.internal.widget.LockPatternUtils
 import com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_BIOMETRIC_AUTH_REQUIRED_FOR_SECURE_LOCK_DEVICE
+import com.android.internal.widget.LockscreenCredential
+import com.android.internal.widget.VerifyCredentialResponse
 import com.android.keyguard.KeyguardSecurityModel
 import com.android.systemui.SysuiTestCase
 import com.android.systemui.authentication.shared.model.AuthenticationMethodModel
@@ -59,6 +61,8 @@ import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.Mock
 import org.mockito.Mockito.verify
 import org.mockito.MockitoAnnotations
+import org.mockito.kotlin.any
+import org.mockito.kotlin.eq
 import org.mockito.kotlin.never
 
 @SmallTest
@@ -210,20 +214,57 @@ class AuthenticationRepositoryTest : SysuiTestCase() {
     }
 
     @Test
+    fun checkCredential_usesExplicitIdentityAfterSelectedUserChanges() =
+        testScope.runTest {
+            val checkedUser = USER_INFOS[0].id
+            userRepository.setSelectedUserInfo(USER_INFOS[1])
+            whenever(lockPatternUtils.checkCredential(any(), eq(checkedUser), any()))
+                .thenReturn(VerifyCredentialResponse.OK)
+            LockscreenCredential.createPin("123456").use { credential ->
+                val result = underTest.checkCredential(credential, checkedUser) {}
+                assertThat(result.checkedUserId).isEqualTo(checkedUser)
+                assertThat(result.matchedUserId).isEqualTo(checkedUser)
+                verify(lockPatternUtils).checkCredential(eq(credential), eq(checkedUser), any())
+            }
+        }
+
+    @Test
+    fun reportFailedAttempt_doesNotAttributeOldAttemptToNewUser() =
+        testScope.runTest {
+            val checkedUser = USER_INFOS[0].id
+            userRepository.setSelectedUserInfo(USER_INFOS[1])
+            underTest.reportAuthenticationAttempt(AuthenticationResult.FAILED, checkedUser)
+
+            verify(lockPatternUtils).reportFailedPasswordAttempt(checkedUser)
+            verify(lockPatternUtils, never()).reportFailedPasswordAttempt(USER_INFOS[1].id)
+        }
+
+    @Test
+    fun reportLockout_doesNotPublishOldUserLockoutToNewBouncer() =
+        testScope.runTest {
+            userRepository.setSelectedUserInfo(USER_INFOS[1])
+            underTest.reportLockoutStarted(30.seconds, USER_INFOS[0].id)
+
+            verify(lockPatternUtils)
+                .reportPasswordLockout(30.seconds.toJavaDuration(), USER_INFOS[0].id)
+            assertThat(underTest.hasLockoutOccurred.value).isFalse()
+        }
+
+    @Test
     fun hasLockoutOccurred() =
         testScope.runTest {
             val hasLockoutOccurred by collectLastValue(underTest.hasLockoutOccurred)
             assertThat(hasLockoutOccurred).isFalse()
 
-            underTest.reportLockoutStarted(1.seconds)
+            underTest.reportLockoutStarted(1.seconds, USER_INFOS[0].id)
             assertThat(hasLockoutOccurred).isTrue()
 
             clock.setElapsedRealtime(clock.elapsedRealtime() + 60.seconds.inWholeMilliseconds)
 
-            underTest.reportAuthenticationAttempt(AuthenticationResult.FAILED)
+            underTest.reportAuthenticationAttempt(AuthenticationResult.FAILED, USER_INFOS[0].id)
             assertThat(hasLockoutOccurred).isTrue()
 
-            underTest.reportAuthenticationAttempt(AuthenticationResult.SUCCEEDED)
+            underTest.reportAuthenticationAttempt(AuthenticationResult.SUCCEEDED, USER_INFOS[0].id)
             assertThat(hasLockoutOccurred).isFalse()
         }
 
@@ -235,7 +276,7 @@ class AuthenticationRepositoryTest : SysuiTestCase() {
             whenever(lockPatternUtils.getStrongAuthForUser(anyInt()))
                 .thenReturn(STRONG_BIOMETRIC_AUTH_REQUIRED_FOR_SECURE_LOCK_DEVICE)
 
-            underTest.reportAuthenticationAttempt(AuthenticationResult.SUCCEEDED)
+            underTest.reportAuthenticationAttempt(AuthenticationResult.SUCCEEDED, USER_INFOS[0].id)
             verify(lockPatternUtils, never()).userPresent(anyInt())
             verify(lockPatternUtils, never()).reportSuccessfulPasswordAttempt(anyInt())
         }

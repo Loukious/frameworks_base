@@ -45,9 +45,14 @@ public class AidlSession {
 
     public AidlSession(@NonNull Supplier<IBiometricsFingerprint> session,
             int userId, AidlResponseHandler aidlResponseHandler) {
-        mSession = new HidlToAidlSessionAdapter(session, userId, aidlResponseHandler);
+        this(session, userId, aidlResponseHandler, userId);
+    }
+
+    public AidlSession(@NonNull Supplier<IBiometricsFingerprint> session,
+            int logicalUserId, AidlResponseHandler aidlResponseHandler, int hardwareUserId) {
+        mSession = new HidlToAidlSessionAdapter(session, hardwareUserId, aidlResponseHandler);
         mHalInterfaceVersion = 0;
-        mUserId = userId;
+        mUserId = logicalUserId;
         mAidlResponseHandler = aidlResponseHandler;
     }
 

@@ -150,6 +150,10 @@ public class UserInfoControllerImpl implements UserInfoController {
             @Override
             protected UserInfoQueryResult doInBackground(Void... params) {
                 final UserManager um = UserManager.get(mContext);
+                if (UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(userInfo.userType)) {
+                    return new UserInfoQueryResult("", UserIcons.getDefaultUserIcon(
+                            context.getResources(), UserHandle.USER_NULL, lightIcon), null);
+                }
 
                 // Fall back to the UserManager nickname if we can't read the name from the local
                 // profile below.
@@ -168,7 +172,8 @@ public class UserInfoControllerImpl implements UserInfoController {
 
                 // If it's a single-user device, get the profile name, since the nickname is not
                 // usually valid
-                if (um.getUsers().size() <= 1) {
+                if (um.getUsers().stream().filter(user -> !UserManager.USER_TYPE_FULL_SECURE_SPACE
+                        .equals(user.userType)).count() <= 1) {
                     try {
                         // Try and read the display name from the local profile
                         final Cursor cursor = context.getContentResolver().query(

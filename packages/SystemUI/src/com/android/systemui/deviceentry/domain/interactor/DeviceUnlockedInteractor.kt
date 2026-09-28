@@ -51,6 +51,9 @@ import com.android.systemui.shared.settings.data.repository.SecureSettingsReposi
 import com.android.systemui.user.data.repository.UserSwitcherRepository
 import com.android.systemui.utils.coroutines.flow.flatMapLatestConflated
 import dagger.Lazy
+import com.android.systemui.securespaces.SecureSpaceEntryCoordinator
+import com.android.systemui.securespaces.primaryAuthenticationProofs
+import kotlinx.coroutines.flow.MutableStateFlow
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
@@ -84,7 +87,7 @@ constructor(
     private val fingerprintAuthInteractor: DeviceEntryFingerprintAuthInteractor,
     private val powerInteractor: PowerInteractor,
     private val biometricSettingsInteractor: DeviceEntryBiometricSettingsInteractor,
-    secureLockDeviceInteractor: Lazy<SecureLockDeviceInteractor>,
+    private val secureLockDeviceInteractor: Lazy<SecureLockDeviceInteractor>,
     private val systemPropertiesHelper: SystemPropertiesHelper,
     private val secureSettingsRepository: SecureSettingsRepository,
     private val keyguardInteractor: KeyguardInteractor,
@@ -107,6 +110,13 @@ constructor(
             faceEnrolledAndEnabled.value ||
                 fingerprintEnrolledAndEnabled.value ||
                 trustAgentEnabled.value
+
+    private val secureSpaceEntry = MutableStateFlow<SecureSpaceEntryCoordinator?>(null)
+
+    @Inject
+    fun setSecureSpaceEntryCoordinator(coordinator: SecureSpaceEntryCoordinator) {
+        secureSpaceEntry.value = coordinator
+    }
 
     /**
      * Reason why device entry is restricted to certain authentication methods for the current user.
@@ -196,6 +206,10 @@ constructor(
 
     /** Indicates when a device has been unlocked from successful authentication on the bouncer. */
     private val onUnlockFromBouncer = authenticationInteractor.onAuthenticationResult.filter { it }
+
+    private val routedPrimaryProofs = secureSpaceEntry.flatMapLatest { coordinator ->
+        coordinator?.primaryAuthenticationProofs() ?: emptyFlow()
+    }
 
     private val deviceUnlockSource =
         /**
@@ -328,9 +342,20 @@ constructor(
 
     private suspend fun handleUnlockEvents() {
         // Unlock the device when a new unlock source is detected.
-        deviceUnlockSource.collect {
-            Log.i(TAG, "unlocking due to \"$it\"")
-            repository.deviceUnlockStatus.value = DeviceUnlockStatus(true, it)
+        merge(
+            deviceUnlockSource.map { source ->
+                source to (null as SecureSpaceEntryCoordinator.Proof?)
+            },
+            routedPrimaryProofs.map {
+                (if (it.biometric) DeviceUnlockSource.Fingerprint else DeviceUnlockSource.BouncerInput) to it
+            },
+        ).collect { (source, proof) ->
+            if (secureSpaceEntry.value?.isAwaitingPolicy == true) return@collect
+            if (proof != null && ((secureLockDevice()
+                    && secureLockDeviceInteractor.get().isSecureLockDeviceEnabled.value)
+                    || secureSpaceEntry.value?.isProofCurrent(proof) != true)) return@collect
+            Log.i(TAG, "unlocking due to \"$source\"")
+            repository.deviceUnlockStatus.value = DeviceUnlockStatus(true, source)
         }
     }
 

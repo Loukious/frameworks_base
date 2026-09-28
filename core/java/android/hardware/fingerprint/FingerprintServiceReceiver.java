@@ -40,6 +40,11 @@ public class FingerprintServiceReceiver extends IFingerprintServiceReceiver.Stub
     }
 
     @Override
+    public void onSecureSpaceAuthenticationSucceeded(android.os.IBinder token, int originUserId,
+            int originSerial, int destinationUserId, int destinationSerial, boolean strongBiometric)
+            throws RemoteException {}
+
+    @Override
     public void onFingerprintDetected(int sensorId, int userId, boolean isStrongBiometric)
             throws RemoteException {
 

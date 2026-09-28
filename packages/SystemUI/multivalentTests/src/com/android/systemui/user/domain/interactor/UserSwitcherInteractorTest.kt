@@ -278,6 +278,55 @@ class UserSwitcherInteractorTest : SysuiTestCase() {
     }
 
     @Test
+    fun users_secureSpacesAreAbsentFromPublicList() {
+        createUserInteractor()
+        testScope.runTest {
+            val owner = createUserInfos(count = 1, includeGuest = false)[0]
+            val secureSpace = UserInfo(
+                10, "Hidden", "", UserInfo.FLAG_FULL,
+                UserManager.USER_TYPE_FULL_SECURE_SPACE,
+            )
+            userRepository.setUserInfos(listOf(owner, secureSpace))
+            userRepository.setSelectedUserInfo(owner)
+            userRepository.setSettings(UserSwitcherSettingsModel(isUserSwitcherEnabled = true))
+            val value = collectLastValue(underTest.users)
+            assertUsers(models = value(), count = 1)
+            // Filtering presentation must not remove the authentication destination.
+            assertThat(userRepository.getSelectedUserInfo().id).isEqualTo(owner.id)
+        }
+    }
+
+    @Test
+    fun users_inSecureSpaceNoPublicSwitcherRecordsOrActions() {
+        createUserInteractor()
+        testScope.runTest {
+            val owner = createUserInfos(count = 1, includeGuest = false)[0]
+            val secureSpace = UserInfo(
+                10, "Hidden", "", UserInfo.FLAG_FULL,
+                UserManager.USER_TYPE_FULL_SECURE_SPACE,
+            )
+            userRepository.setUserInfos(listOf(owner, secureSpace))
+            userRepository.setSelectedUserInfo(owner)
+            userRepository.setSettings(UserSwitcherSettingsModel(isUserSwitcherEnabled = true))
+            val users = collectLastValue(underTest.users)
+            val actions = collectLastValue(underTest.actions)
+            val records = collectLastValue(underTest.userRecords)
+            val selectedRecord = collectLastValue(underTest.selectedUserRecord)
+            val publicSelectedUser = collectLastValue(underTest.selectedUser)
+            // Exercise a live selection change, including previously cached owner records.
+            userRepository.setSelectedUserInfo(secureSpace)
+            assertThat(underTest.isUserSwitcherEnabled).isFalse()
+            assertThat(users()).isEmpty()
+            assertThat(actions()).isEmpty()
+            assertThat(records()).isEmpty()
+            assertThat(selectedRecord()).isNull()
+            assertThat(publicSelectedUser()?.name).isEqualTo(Text.Loaded(""))
+            assertThat(publicSelectedUser()?.isSelectable).isFalse()
+            assertThat(userRepository.getSelectedUserInfo().id).isEqualTo(secureSpace.id)
+        }
+    }
+
+    @Test
     fun users_switcherEnabled() {
         createUserInteractor()
         testScope.runTest {

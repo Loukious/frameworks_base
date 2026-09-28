@@ -301,6 +301,16 @@ public class AuthService extends SystemService {
         public long authenticate(IBinder token, long sessionId, int userId,
                 IBiometricServiceReceiver receiver, String opPackageName, PromptInfo promptInfo)
                 throws RemoteException {
+            int caller = android.os.Binder.getCallingUid();
+            if (caller != android.os.Process.SYSTEM_UID
+                    && !Utils.isKeyguard(getContext(), opPackageName)) {
+                android.os.UserManager users = getContext().getSystemService(android.os.UserManager.class);
+                if (users.getCredentialOwnerProfile(android.os.UserHandle.getUserId(caller))
+                        != users.getCredentialOwnerProfile(userId)) {
+                    throw new SecurityException("App biometric authentication is scoped to its credential owner");
+                }
+            }
+
             // Only allow internal clients to authenticate with a different userId.
             final int callingUserId = UserHandle.getCallingUserId();
             final int callingUid = Binder.getCallingUid();

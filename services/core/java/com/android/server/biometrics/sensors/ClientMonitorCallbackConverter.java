@@ -45,6 +45,16 @@ public class ClientMonitorCallbackConverter {
     private final IFaceServiceReceiver mFaceServiceReceiver; // FaceManager
     private final IFingerprintServiceReceiver mFingerprintServiceReceiver; // FingerprintManager
 
+    public void onSecureSpaceAuthenticationSucceeded(android.os.IBinder token, int originUserId,
+            int originSerial, int destinationUserId, int destinationSerial, boolean strongBiometric)
+            throws android.os.RemoteException {
+        if (mFingerprintServiceReceiver == null) {
+            throw new IllegalStateException("Only a trusted keyguard fingerprint receiver can route");
+        }
+        mFingerprintServiceReceiver.onSecureSpaceAuthenticationSucceeded(token, originUserId,
+                originSerial, destinationUserId, destinationSerial, strongBiometric);
+    }
+
     public ClientMonitorCallbackConverter(IBiometricSensorReceiver sensorReceiver) {
         mSensorReceiver = sensorReceiver;
         mFaceServiceReceiver = null;

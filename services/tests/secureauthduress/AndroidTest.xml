@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configuration description="Duress-verifier storage validation on the host.">
+    <option name="test-suite-tag" value="general-tests" />
+    <test class="com.android.tradefed.testtype.HostTest">
+        <option name="jar" value="SecureAuthDuressCodecTests.jar" />
+        <option name="class" value="com.android.server.locksettings.SecureAuthDuressCodecTest" />
+    </test>
+</configuration>

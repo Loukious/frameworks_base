@@ -153,14 +153,10 @@ constructor(
     @SuppressLint("SharedFlowCreation")
     override val primaryBouncerStartingDisappearAnimation =
         MutableSharedFlow<Runnable?>(extraBufferCapacity = 2, replay = 1)
+    @Volatile private var primaryBouncerDisappearAnimationPending = false
 
     override fun isPrimaryBouncerStartingDisappearAnimation(): Boolean {
-        val replayCache = primaryBouncerStartingDisappearAnimation.replayCache
-        return if (!replayCache.isEmpty()) {
-            replayCache.last() != null
-        } else {
-            false
-        }
+        return primaryBouncerDisappearAnimationPending
     }
 
     /** Determines if we want to instantaneously show the primary bouncer instead of translating. */
@@ -244,7 +240,13 @@ constructor(
     }
 
     override fun setPrimaryStartDisappearAnimation(runnable: Runnable?) {
-        primaryBouncerStartingDisappearAnimation.tryEmit(runnable)
+        if (runnable == null) {
+            primaryBouncerDisappearAnimationPending = false
+            primaryBouncerStartingDisappearAnimation.tryEmit(null)
+            return
+        }
+        primaryBouncerDisappearAnimationPending =
+            primaryBouncerStartingDisappearAnimation.tryEmit(runnable)
     }
 
     override fun setPanelExpansion(panelExpansion: Float) {

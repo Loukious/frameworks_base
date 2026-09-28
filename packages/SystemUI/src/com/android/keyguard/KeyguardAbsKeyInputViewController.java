@@ -65,6 +65,19 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
     private CountDownTimer mCountdownTimer;
     private boolean mDismissing;
     protected AsyncTask<?, ?, ?> mPendingLockCheck;
+    private long mCredentialCheckGeneration;
+    private boolean mClearingVerifiedCredential;
+    private com.android.systemui.securespaces.SecureSpaceEntryCoordinator mSecureSpaceEntry;
+
+    void setSecureSpaceEntryCoordinator(
+            com.android.systemui.securespaces.SecureSpaceEntryCoordinator coordinator) {
+        mSecureSpaceEntry = coordinator;
+    }
+
+    private boolean isSecureSpaceRouting() {
+        return mSecureSpaceEntry != null && mSecureSpaceEntry.isAvailable();
+    }
+
     protected boolean mResumed;
     protected boolean mLockedOut;
     private static final String TAG = "KeyguardAbsKeyInputViewController";
@@ -128,7 +141,7 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
         // if the user is currently locked out, enforce it.
         Duration lockoutEndTime = mLockPatternUtils.getLockoutEndTime(
                 mSelectedUserInteractor.getSelectedUserId());
-        if (shouldLockout(lockoutEndTime)) {
+        if (!isSecureSpaceRouting() && shouldLockout(lockoutEndTime)) {
             handleAttemptLockout(lockoutEndTime);
         }
     }
@@ -244,9 +257,11 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
 
     protected void verifyPasswordAndUnlock() {
         if (mDismissing) return; // already verified but haven't been dismissed; don't do it again.
-        if (mLockedOut) return;
+        if (mLockedOut && (!isSecureSpaceRouting()
+                || mSecureSpaceEntry.getLockoutEndTimeMillis() > 0)) return;
 
         final LockscreenCredential password = mView.getEnteredCredential();
+        final long checkGeneration = ++mCredentialCheckGeneration;
         mView.setPasswordEntryInputEnabled(false);
         if (mPendingLockCheck != null) {
             mPendingLockCheck.cancel(false);
@@ -267,6 +282,58 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
         mLatencyTracker.onActionStart(ACTION_CHECK_CREDENTIAL_UNLOCKED);
 
         mKeyguardUpdateMonitor.setCredentialAttempted();
+        if (isSecureSpaceRouting()) {
+            try {
+                mSecureSpaceEntry.submit(password,
+                        new com.android.systemui.securespaces.SecureSpaceEntryCoordinator.Callback() {
+                    @Override
+                    public void onAccepted() {
+                        // Animated PIN clearing reports user activity. It is not new input and
+                        // must not revoke the native proof that is completing this unlock.
+                        mClearingVerifiedCredential = true;
+                        try {
+                            mView.resetPasswordText(true, false);
+                        } finally {
+                            mClearingVerifiedCredential = false;
+                        }
+                        mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL);
+                        mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL_UNLOCKED);
+                    }
+                    @Override
+                    public void onRejected(
+                            com.android.internal.widget.SecureSpaceCredentialResponse response) {
+                    mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL);
+                    mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL_UNLOCKED);
+                    if (checkGeneration != mCredentialCheckGeneration || !mResumed
+                            || mSelectedUserInteractor.getSelectedUserId() != userId) return;
+                    mView.setPasswordEntryInputEnabled(true);
+                    if (response.isAllCertainlyIncorrect()) {
+                        onPasswordChecked(userId, false, Duration.ZERO, true, false);
+                        long endTime = mSecureSpaceEntry.getLockoutEndTimeMillis();
+                        if (endTime > 0) handleAttemptLockout(Duration.ofMillis(endTime));
+                    } else {
+                        // Retry/service/stale responses do not establish a wrong credential.
+                        mView.resetPasswordText(true, false);
+                        long endTime = mSecureSpaceEntry.getLockoutEndTimeMillis();
+                        if (endTime > 0) handleAttemptLockout(Duration.ofMillis(endTime));
+                    }
+                    }
+                    @Override
+                    public void onCurrentUserChecked(VerifyCredentialResponse response) {
+                        mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL);
+                        mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL_UNLOCKED);
+                        if (checkGeneration != mCredentialCheckGeneration || !mResumed
+                                || mSelectedUserInteractor.getSelectedUserId() != userId) return;
+                        mView.setPasswordEntryInputEnabled(true);
+                        onPasswordChecked(userId, response.isMatched(), response.getTimeout(),
+                                true, response.isCredAlreadyTried());
+                    }
+                });
+            } finally {
+                password.zeroize();
+            }
+            return;
+        }
         mPendingLockCheck = mLockPatternChecker.checkCredential(
                 mLockPatternUtils,
                 password,
@@ -276,10 +343,8 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
                     @Override
                     public void onEarlyMatched() {
                         mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL);
-
-                        onPasswordChecked(userId, true /* matched */, Duration.ZERO /* timeout */,
-                                true /* isValidPassword */, false /* isDuplicate */);
-                        password.zeroize();
+                        // Native verification is still using the credential. Only the completed
+                        // response can authorize dismissal; this callback measures latency only.
                     }
 
                     @Override
@@ -289,19 +354,22 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
                         boolean isDuplicate = lockscreenIndicateDuplicateGuesses()
                                 && response.isCredAlreadyTried();
                         mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL_UNLOCKED);
-                        mView.setPasswordEntryInputEnabled(true);
-                        mPendingLockCheck = null;
-                        if (!matched) {
-                            onPasswordChecked(userId, false /* matched */, timeout,
+                        try {
+                            if (checkGeneration != mCredentialCheckGeneration || !mResumed
+                                    || mSelectedUserInteractor.getSelectedUserId() != userId) {
+                                return;
+                            }
+                            mView.setPasswordEntryInputEnabled(true);
+                            mPendingLockCheck = null;
+                            onPasswordChecked(userId, matched, timeout,
                                     true /* isValidPassword */, isDuplicate);
+                        } finally {
+                            password.zeroize();
                         }
-                        password.zeroize();
                     }
 
                     @Override
                     public void onCancelled() {
-                        // We already got dismissed with the early matched callback, so we cancelled
-                        // the check. However, we still need to note down the latency.
                         mLatencyTracker.onActionEnd(ACTION_CHECK_CREDENTIAL_UNLOCKED);
                         password.zeroize();
                     }
@@ -320,6 +388,28 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
     }
 
     protected void onUserInput() {
+        if (mClearingVerifiedCredential) return;
+        if (mSecureSpaceEntry != null && mSecureSpaceEntry.isSwitchInProgress()) {
+            mView.setPasswordEntryInputEnabled(false);
+            mClearingVerifiedCredential = true;
+            try {
+                mView.resetPasswordText(true, false);
+            } finally {
+                mClearingVerifiedCredential = false;
+            }
+            mView.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (!mResumed) return;
+                    if (mSecureSpaceEntry.isSwitchInProgress()) {
+                        mView.postDelayed(this, 250);
+                    } else {
+                        mView.setPasswordEntryInputEnabled(true);
+                    }
+                }
+            }, 250);
+            return;
+        }
+        if (mSecureSpaceEntry != null) mSecureSpaceEntry.cancel();
         mFalsingCollector.updateFalseConfidence(FalsingClassifier.Result.passed(0.6));
         getKeyguardSecurityCallback().userActivity();
         getKeyguardSecurityCallback().onUserInput();
@@ -335,6 +425,8 @@ public abstract class KeyguardAbsKeyInputViewController<T extends KeyguardAbsKey
     @Override
     public void onPause() {
         mResumed = false;
+        if (mSecureSpaceEntry != null) mSecureSpaceEntry.onSourcePaused();
+        ++mCredentialCheckGeneration;
 
         if (mCountdownTimer != null) {
             mCountdownTimer.cancel();

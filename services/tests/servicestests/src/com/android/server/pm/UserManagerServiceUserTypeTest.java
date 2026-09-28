@@ -81,6 +81,21 @@ public class UserManagerServiceUserTypeTest {
     }
 
     @Test
+    public void testSecureSpace_isFullSecondaryWithIndependentPersistedType() {
+        ArrayMap<String, UserTypeDetails> types = UserTypeFactory.getUserTypes();
+        UserTypeDetails secondary = types.get(UserManager.USER_TYPE_FULL_SECONDARY);
+        UserTypeDetails space = types.get(UserManager.USER_TYPE_FULL_SECURE_SPACE);
+        assertNotNull(space);
+        expect.that(space.isFull()).isTrue();
+        expect.that(space.isProfile()).isFalse();
+        expect.that(space.getDefaultUserInfoFlags())
+                .isEqualTo(secondary.getDefaultUserInfoFlags());
+        expect.that(space.getMaxAllowed()).isEqualTo(secondary.getMaxAllowed());
+        expect.that(space.getDefaultRestrictions().keySet())
+                .containsExactlyElementsIn(secondary.getDefaultRestrictions().keySet());
+    }
+
+    @Test
     @EnableFlags(android.multiuser.Flags.FLAG_HSU_APP_MANAGEMENT)
     public void testUserTypeBuilder_systemHeadless_hsuAppManagementEnabled() throws Exception {
         assumeTrue("Feature supported only on Headless System User Mode devices",

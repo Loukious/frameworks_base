@@ -351,6 +351,35 @@ public class LockscreenCredential implements Parcelable, AutoCloseable {
     }
 
     /**
+     * Copies typed lockscreen input for a candidate's native PIN/password verifier.
+     *
+     * <p>Concealed entry cannot assume that every user's credential has the foreground user's
+     * type. This preserves the exact input bytes and legacy character information; it does not
+     * validate, hash, or compare the candidate's secret. The caller must still perform native
+     * verification and close the returned independent copy. Enrollment must use the ordinary
+     * constructors and validation instead.
+     *
+     * @return an independent credential, or null for unsupported credential types
+     * @hide
+     */
+    @Nullable
+    public LockscreenCredential duplicateForSecureSpaceVerification(int storedCredentialType) {
+        ensureNotZeroized();
+        if (mIsUnifiedProfilePassword || (!isPin() && !isPassword())) {
+            return null;
+        }
+        int type = storedCredentialType == CREDENTIAL_TYPE_PASSWORD_OR_PIN
+                ? mType : storedCredentialType;
+        if (type != CREDENTIAL_TYPE_PIN && type != CREDENTIAL_TYPE_PASSWORD) {
+            return null;
+        }
+        return new LockscreenCredential(type,
+                ArrayUtils.copyOfArrayNonMovable(mCredential, mCredential.length),
+                mHasInvalidChars, /* isUnifiedProfilePassword= */ false,
+                /* isFromParcel= */ false);
+    }
+
+    /**
      * Hash the password for password history check purpose.
      */
     public String passwordToHistoryHash(byte[] salt, byte[] hashFactor) {

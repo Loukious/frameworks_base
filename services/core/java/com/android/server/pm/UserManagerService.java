@@ -3333,6 +3333,13 @@ public class UserManagerService extends IUserManager.Stub {
 
     @VisibleForTesting
     boolean isUserSwitcherEnabled(@UserIdInt int userId) {
+        synchronized (mUsersLock) {
+            UserInfo user = getUserInfoLU(userId);
+            if (user != null
+                    && UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(user.userType)) {
+                return false;
+            }
+        }
         boolean multiUserSettingOn = Settings.Global.getInt(mContext.getContentResolver(),
                 Settings.Global.USER_SWITCHER_ENABLED,
                 getContextResources().getBoolean(com.android.internal
@@ -8769,6 +8776,17 @@ public class UserManagerService extends IUserManager.Stub {
         @Override
         public int[] getUserIds() {
             return UserManagerService.this.getUserIds();
+        }
+
+        @Override
+        public int[] getUserIdsForKeyErasure() {
+            synchronized (mUsersLock) {
+                int[] ids = new int[mUsers.size()];
+                for (int i = 0; i < ids.length; i++) {
+                    ids[i] = mUsers.keyAt(i);
+                }
+                return ids;
+            }
         }
 
         @Override

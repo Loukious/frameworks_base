@@ -56,6 +56,12 @@ import com.android.systemui.util.time.SystemClock
 import dagger.Binds
 import dagger.Module
 import java.util.function.Function
+import com.android.systemui.securespaces.SecureSpaceEntryCoordinator
+import com.android.internal.widget.SecureSpaceCredentialResponse
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import javax.inject.Inject
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.ZERO
@@ -166,6 +172,7 @@ interface AuthenticationRepository {
      */
     suspend fun checkCredential(
         credential: LockscreenCredential,
+        @UserIdInt userId: Int,
         onEarlyMatched: () -> Unit,
     ): AuthenticationResultModel
 
@@ -175,11 +182,12 @@ interface AuthenticationRepository {
     /** Reports an authentication attempt. Skipped attempts are not reported downstream. */
     suspend fun reportAuthenticationAttempt(
         result: AuthenticationResult,
+        @UserIdInt userId: Int,
         isDuplicate: Boolean = false,
     )
 
     /** Reports that the user has entered a temporary device lockout (throttling). */
-    suspend fun reportLockoutStarted(duration: Duration)
+    suspend fun reportLockoutStarted(duration: Duration, @UserIdInt userId: Int)
 
     /**
      * Returns the current maximum number of login attempts that are allowed before the device or
@@ -261,11 +269,18 @@ constructor(
     @SceneFrameworkTableLog private val tableLogBuffer: TableLogBuffer,
 ) : AuthenticationRepository {
 
+    private var secureSpaceEntry: SecureSpaceEntryCoordinator? = null
+
+    @Inject
+    fun setSecureSpaceEntryCoordinator(coordinator: SecureSpaceEntryCoordinator) {
+        secureSpaceEntry = coordinator
+    }
+
     override val hintedPinLength: Int = 6
 
     /**
-     * Emits whenever the current user's lockscreen knowledge factor (credential) changes.
-     * Used to force-refresh cached pattern-related settings (size, dots, error path) that
+     * Emits whenever the current user's lockscreen knowledge factor (credential) changes. Used to
+     * force-refresh cached pattern-related settings (size, dots, error path) that
      * LockSettingsService doesn't otherwise notify observers about.
      */
     private val lockscreenKnowledgeFactorChanged: Flow<Unit> =
@@ -383,10 +398,16 @@ constructor(
         _failedAuthenticationAttempts.asStateFlow()
 
     override val lockoutEndTime: Duration?
-        get() =
-            lockPatternUtils.getLockoutEndTime(selectedUserId).toKotlinDuration().takeIf {
+        get() {
+            val coordinator = secureSpaceEntry
+            if (coordinator?.isAvailable == true) {
+                return coordinator.lockoutEndTimeMillis.takeIf { it > clock.elapsedRealtime() }
+                    ?.milliseconds
+            }
+            return lockPatternUtils.getLockoutEndTime(selectedUserId).toKotlinDuration().takeIf {
                 clock.elapsedRealtime().milliseconds < it
             }
+        }
 
     private val _hasLockoutOccurred = MutableStateFlow(false)
     override val hasLockoutOccurred: StateFlow<Boolean> = _hasLockoutOccurred.asStateFlow()
@@ -410,12 +431,52 @@ constructor(
 
     override suspend fun checkCredential(
         credential: LockscreenCredential,
+        @UserIdInt userId: Int,
         onEarlyMatched: () -> Unit,
     ): AuthenticationResultModel {
+        val coordinator = secureSpaceEntry
+        if (SceneContainerFlag.isEnabled && coordinator != null) {
+            val routed = withContext(Dispatchers.Main.immediate) {
+                if (!coordinator.isAvailable) return@withContext null
+                suspendCancellableCoroutine<AuthenticationResultModel> { continuation ->
+                    val active = AtomicBoolean(true)
+                    val callback = object : SecureSpaceEntryCoordinator.Callback {
+                        override fun isActive() = active.get()
+                        override fun onAccepted() {
+                            if (continuation.isActive) continuation.resume(
+                                AuthenticationResultModel(checkedUserId = userId,
+                                    isHandoffPending = true))
+                        }
+                        override fun onCurrentUserChecked(
+                            response: com.android.internal.widget.VerifyCredentialResponse,
+                        ) {
+                            if (continuation.isActive) continuation.resume(
+                                AuthenticationResultModel(checkedUserId = userId,
+                                    isSuccessful = response.isMatched,
+                                    lockoutDuration = response.timeout.toKotlinDuration(),
+                                    isDuplicate = response.isCredAlreadyTried))
+                        }
+                        override fun onRejected(response: SecureSpaceCredentialResponse) {
+                            if (continuation.isActive) continuation.resume(
+                                AuthenticationResultModel(checkedUserId = userId,
+                                    lockoutDuration = (coordinator.lockoutEndTimeMillis
+                                        - clock.elapsedRealtime()).coerceAtLeast(0).milliseconds,
+                                    isInconclusive = !response.isAllCertainlyIncorrect))
+                        }
+                    }
+                    continuation.invokeOnCancellation {
+                        if (!coordinator.isPreparedSwitch(callback)) active.set(false)
+                        coordinator.cancelSource(callback)
+                    }
+                    if (continuation.isActive) coordinator.submit(credential, callback)
+                }
+            }
+            if (routed != null) return routed
+        }
         return withContext(backgroundDispatcher) {
-            val response =
-                lockPatternUtils.checkCredential(credential, selectedUserId) { onEarlyMatched() }
+            val response = lockPatternUtils.checkCredential(credential, userId) { onEarlyMatched() }
             return@withContext AuthenticationResultModel(
+                checkedUserId = userId,
                 isSuccessful = response.isMatched,
                 lockoutDuration = response.timeout.toKotlinDuration(),
                 isDuplicate = lockscreenIndicateDuplicateGuesses() && response.isCredAlreadyTried,
@@ -429,6 +490,7 @@ constructor(
 
     override suspend fun reportAuthenticationAttempt(
         result: AuthenticationResult,
+        @UserIdInt userId: Int,
         isDuplicate: Boolean,
     ) {
         withContext(backgroundDispatcher) {
@@ -438,7 +500,7 @@ constructor(
                         secureLockDevice() &&
                             SceneContainerFlag.isEnabled &&
                             lockPatternUtils
-                                .getStrongAuthForUser(selectedUserId)
+                                .getStrongAuthForUser(userId)
                                 .and(STRONG_BIOMETRIC_AUTH_REQUIRED_FOR_SECURE_LOCK_DEVICE) != 0
                     ) {
                         Log.d(
@@ -447,31 +509,36 @@ constructor(
                                 "biometric authentication before unlocking.",
                         )
                     } else {
-                        lockPatternUtils.userPresent(selectedUserId)
-                        lockPatternUtils.reportSuccessfulPasswordAttempt(selectedUserId)
+                        lockPatternUtils.userPresent(userId)
+                        lockPatternUtils.reportSuccessfulPasswordAttempt(userId)
                     }
-                    _hasLockoutOccurred.value = false
+                    if (selectedUserId == userId) _hasLockoutOccurred.value = false
                 }
                 AuthenticationResult.FAILED -> {
-                    lockPatternUtils.reportFailedPasswordAttempt(selectedUserId)
+                    lockPatternUtils.reportFailedPasswordAttempt(userId)
                 }
-                AuthenticationResult.SKIPPED -> {
+                AuthenticationResult.SKIPPED, AuthenticationResult.HANDOFF_PENDING -> {
                     // Skipped, we don't want to use any downstream attempts here.
                 }
             }
-            _isDuplicateAttempt.value = isDuplicate
-            // Skipped attempts don't change anything downstream.
-            if (result != AuthenticationResult.SKIPPED) {
-                _failedAuthenticationAttempts.value = getFailedAuthenticationAttemptCount()
+            // Report hardware attempts to their original identity, but do not publish an old
+            // user's result into the newly selected user's bouncer state.
+            if (selectedUserId == userId) {
+                _isDuplicateAttempt.value = isDuplicate
+                if (result != AuthenticationResult.SKIPPED
+                        && result != AuthenticationResult.HANDOFF_PENDING) {
+                    val count = lockPatternUtils.getCurrentFailedPasswordAttempts(userId)
+                    if (selectedUserId == userId) _failedAuthenticationAttempts.value = count
+                }
             }
         }
     }
 
-    override suspend fun reportLockoutStarted(duration: Duration) {
+    override suspend fun reportLockoutStarted(duration: Duration, @UserIdInt userId: Int) {
         withContext(backgroundDispatcher) {
-            lockPatternUtils.reportPasswordLockout(duration.toJavaDuration(), selectedUserId)
+            lockPatternUtils.reportPasswordLockout(duration.toJavaDuration(), userId)
         }
-        _hasLockoutOccurred.value = true
+        if (selectedUserId == userId) _hasLockoutOccurred.value = true
     }
 
     private suspend fun getFailedAuthenticationAttemptCount(): Int {

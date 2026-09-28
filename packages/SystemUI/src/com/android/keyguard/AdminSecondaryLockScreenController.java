@@ -59,64 +59,77 @@ public class AdminSecondaryLockScreenController {
     private static final int REMOTE_CONTENT_READY_TIMEOUT_MILLIS = 500;
     private final KeyguardUpdateMonitor mUpdateMonitor;
     private final Context mContext;
-    private final ConstraintLayout mParent;
+    private ConstraintLayout mParent;
+    private final ConstraintLayout mDefaultParent;
+    private long mGeneration;
+    private int mTargetUser = UserHandle.USER_NULL;
     private AdminSecurityView mView;
     private Handler mHandler;
     private IKeyguardClient mClient;
     private KeyguardSecurityCallback mKeyguardCallback;
     private SelectedUserInteractor mSelectedUserInteractor;
 
-    private final ServiceConnection mConnection = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(ComponentName className, IBinder service) {
-            mClient = IKeyguardClient.Stub.asInterface(service);
-            if (mView.isAttachedToWindow() && mClient != null) {
-                onSurfaceReady();
+    private ServiceConnection mConnection;
+    private boolean mBound;
 
-                try {
-                    service.linkToDeath(mKeyguardClientDeathRecipient, 0);
-                } catch (RemoteException e) {
-                    // Failed to link to death, just dismiss and unbind the service for now.
-                    Log.e(TAG, "Lost connection to secondary lockscreen service", e);
-                    dismiss(mSelectedUserInteractor.getSelectedUserId());
+    private ServiceConnection connectionForCurrentRequest() {
+        final long generation = mGeneration;
+        final int targetUser = mTargetUser;
+        return new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName className, IBinder service) {
+                if (generation != mGeneration || !mBound || targetUser != mTargetUser) return;
+                mClient = IKeyguardClient.Stub.asInterface(service);
+                if (mView.isAttachedToWindow() && mClient != null) {
+                    onSurfaceReady();
+                    try {
+                        service.linkToDeath(mKeyguardClientDeathRecipient, 0);
+                    } catch (RemoteException e) {
+                        dismiss(targetUser);
+                    }
                 }
             }
-        }
-
-        @Override
-        public void onServiceDisconnected(ComponentName className) {
-            mClient = null;
-        }
-    };
+            @Override
+            public void onServiceDisconnected(ComponentName className) {
+                if (generation == mGeneration) mClient = null;
+            }
+        };
+    }
 
     private final IBinder.DeathRecipient mKeyguardClientDeathRecipient = () -> {
         hide(); // hide also takes care of unlinking to death.
         Log.d(TAG, "KeyguardClient service died");
     };
 
-    private final IKeyguardCallback mCallback = new IKeyguardCallback.Stub() {
-        @Override
-        public void onDismiss() {
-            mHandler.post(() -> {
-                dismiss(UserHandle.getCallingUserId());
-            });
-        }
-
-        @Override
-        public void onRemoteContentReady(
-                @Nullable SurfaceControlViewHost.SurfacePackage surfacePackage) {
-            if (mHandler != null) {
-                mHandler.removeCallbacksAndMessages(null);
-            }
-            if (surfacePackage != null) {
-                mView.setChildSurfacePackage(surfacePackage);
-            } else {
+    private IKeyguardCallback callbackForCurrentRequest() {
+        final long generation = mGeneration;
+        final int targetUser = mTargetUser;
+        return new IKeyguardCallback.Stub() {
+            @Override
+            public void onDismiss() {
+                final int callingUser = UserHandle.getCallingUserId();
                 mHandler.post(() -> {
-                    dismiss(mSelectedUserInteractor.getSelectedUserId());
+                    if (generation == mGeneration && callingUser == targetUser) dismiss(targetUser);
                 });
             }
-        }
-    };
+
+            @Override
+            public void onRemoteContentReady(
+                    @Nullable SurfaceControlViewHost.SurfacePackage surfacePackage) {
+                final int callingUser = UserHandle.getCallingUserId();
+                mHandler.post(() -> {
+                    if (generation != mGeneration || callingUser != targetUser
+                            || !mView.isAttachedToWindow()) {
+                        if (surfacePackage != null) surfacePackage.release();
+                        return;
+                    }
+                    mHandler.removeCallbacksAndMessages(null);
+                    if (surfacePackage != null) mView.setChildSurfacePackage(surfacePackage);
+                    else dismiss(targetUser);
+                });
+            }
+        };
+    }
 
     private final KeyguardUpdateMonitorCallback mUpdateCallback =
             new KeyguardUpdateMonitorCallback() {
@@ -164,6 +177,7 @@ public class AdminSecondaryLockScreenController {
         mContext = context;
         mHandler = handler;
         mParent = parent;
+        mDefaultParent = parent;
         mUpdateMonitor = updateMonitor;
         mKeyguardCallback = callback;
         mView = new AdminSecurityView(mContext, mSurfaceHolderCallback);
@@ -174,9 +188,24 @@ public class AdminSecondaryLockScreenController {
     /**
      * Displays the Admin security Surface view.
      */
+    public void setParent(ConstraintLayout parent) {
+        if (mParent == parent) return;
+        hide();
+        mParent = parent;
+    }
+
     public void show(Intent serviceIntent) {
-        if (mClient == null) {
-            mContext.bindService(serviceIntent, mConnection, Context.BIND_AUTO_CREATE);
+        if (!mView.isAttachedToWindow()) {
+            mGeneration++;
+            mTargetUser = mSelectedUserInteractor.getSelectedUserId();
+        }
+        if (mParent.getWindowInsetsController() != null) {
+            mParent.getWindowInsetsController().hide(android.view.WindowInsets.Type.ime());
+        }
+        if (!mBound) {
+            mConnection = connectionForCurrentRequest();
+            mBound = mContext.bindServiceAsUser(serviceIntent, mConnection, Context.BIND_AUTO_CREATE,
+                    UserHandle.of(mTargetUser));
         }
         if (!mView.isAttachedToWindow()) {
             mParent.addView(mView);
@@ -196,6 +225,9 @@ public class AdminSecondaryLockScreenController {
      * Hides the Admin security Surface view.
      */
     public void hide() {
+        mGeneration++;
+        mTargetUser = UserHandle.USER_NULL;
+        mHandler.removeCallbacksAndMessages(null);
         if (mView.isAttachedToWindow()) {
             mParent.removeView(mView);
         }
@@ -205,9 +237,13 @@ public class AdminSecondaryLockScreenController {
             } catch (NoSuchElementException e) {
                 Log.w(TAG, "IKeyguardClient death recipient already released");
             }
-            mContext.unbindService(mConnection);
             mClient = null;
         }
+        if (mBound) {
+            mContext.unbindService(mConnection);
+            mBound = false;
+        }
+        mParent = mDefaultParent;
     }
 
     private void onSurfaceReady() {
@@ -215,7 +251,7 @@ public class AdminSecondaryLockScreenController {
             IBinder hostToken = mView.getHostToken();
             // Should never be null when SurfaceView is attached to window.
             if (hostToken != null) {
-                mClient.onCreateKeyguardSurface(hostToken, mCallback);
+                mClient.onCreateKeyguardSurface(hostToken, callbackForCurrentRequest());
             } else {
                 hide();
             }

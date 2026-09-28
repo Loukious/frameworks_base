@@ -915,7 +915,7 @@ public final class AuthSession implements IBinder.DeathRecipient {
                 case BiometricPrompt.DISMISSED_REASON_BIOMETRIC_CONFIRMED:
                 case BiometricPrompt.DISMISSED_REASON_BIOMETRIC_CONFIRM_NOT_REQUIRED:
                     if (mTokenEscrow != null) {
-                        final int result = mKeyStoreAuthorization.addAuthToken(mTokenEscrow);
+                        final int result = BiometricUserScope.addAuthToken(mContext, mKeyStoreAuthorization, mTokenEscrow, mUserId);
                         Slog.d(TAG, "addAuthToken: " + result);
                     } else {
                         Slog.e(TAG, "mTokenEscrow is null");

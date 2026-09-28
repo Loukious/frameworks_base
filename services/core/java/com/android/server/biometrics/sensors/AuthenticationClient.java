@@ -173,6 +173,21 @@ public abstract class AuthenticationClient<T, O extends AuthenticateOptions>
         return mOperationId != 0;
     }
 
+    /** Native fingerprint routing owns dismissal; this records the physical match only. */
+    protected final void recordSecureSpaceKeyguardSuccess(byte[] token, int authenticatedUser) {
+        mAuthSuccess = true;
+        markAlreadyDone();
+        if (mTaskStackListener != null) {
+            mActivityTaskManager.unregisterTaskStackListener(mTaskStackListener);
+        }
+        if (mIsStrongBiometric) {
+            mBiometricManager.resetLockoutTimeBound(getToken(), getContext().getOpPackageName(),
+                    getSensorId(), authenticatedUser, token);
+        }
+        com.android.server.biometrics.BiometricUserScope.addAuthToken(getContext(),
+                KeyStoreAuthorization.getInstance(), token, authenticatedUser);
+    }
+
     @Override
     public void onAuthenticated(BiometricAuthenticator.Identifier identifier,
             boolean authenticated, ArrayList<Byte> hardwareAuthToken) {
@@ -250,7 +265,8 @@ public abstract class AuthenticationClient<T, O extends AuthenticateOptions>
                             getSensorId(), getTargetUserId(), byteToken);
                 }
 
-                final int result = KeyStoreAuthorization.getInstance().addAuthToken(byteToken);
+                final int result = com.android.server.biometrics.BiometricUserScope.addAuthToken(getContext(),
+                        KeyStoreAuthorization.getInstance(), byteToken, getTargetUserId());
                 if (result != 0) {
                     Slog.d(TAG, "Error adding auth token : " + result);
                 } else {

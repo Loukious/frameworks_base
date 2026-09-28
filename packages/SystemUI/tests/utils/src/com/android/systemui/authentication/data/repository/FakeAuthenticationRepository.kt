@@ -120,10 +120,18 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
         credentialOverride = pin
     }
 
+    var lastReportedUserId: Int? = null
+        private set
+
+    var lastCheckedCredential: LockscreenCredential? = null
+        private set
+
     override suspend fun reportAuthenticationAttempt(
         result: AuthenticationResult,
+        userId: Int,
         isDuplicate: Boolean,
     ) {
+        lastReportedUserId = userId
         when (result) {
             AuthenticationResult.SUCCEEDED -> {
                 _failedAuthenticationAttempts.value = 0
@@ -135,7 +143,7 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
             AuthenticationResult.FAILED -> {
                 _failedAuthenticationAttempts.value++
             }
-            AuthenticationResult.SKIPPED -> {}
+            AuthenticationResult.SKIPPED, AuthenticationResult.HANDOFF_PENDING -> {}
         }
         _isDuplicateAttempt.value = isDuplicate
     }
@@ -153,7 +161,7 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
 
     private var deferred: CompletableDeferred<Unit>? = null
 
-    override suspend fun reportLockoutStarted(duration: Duration) {
+    override suspend fun reportLockoutStarted(duration: Duration, userId: Int) {
         _lockoutEndTime = (currentTime + duration).takeIf { duration.isPositive() }
         hasLockoutOccurred.value = true
         lockoutStartedReportCount++
@@ -181,8 +189,10 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
 
     override suspend fun checkCredential(
         credential: LockscreenCredential,
+        userId: Int,
         onEarlyMatched: () -> Unit,
     ): AuthenticationResultModel {
+        lastCheckedCredential = credential
         return credentialCheckingMutex.withLock {
             Log.d(
                 TAG,
@@ -190,6 +200,7 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
             )
             if (credential in previousAttempts) {
                 return AuthenticationResultModel(
+                    checkedUserId = userId,
                     isSuccessful = false,
                     lockoutDuration = Duration.ZERO,
                     isDuplicate = true,
@@ -221,6 +232,7 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
                 lockoutOverride?.let {
                     lockoutOverride = null
                     return@checkCredential AuthenticationResultModel(
+                        checkedUserId = userId,
                         isSuccessful = false,
                         lockoutDuration = it,
                     )
@@ -229,9 +241,17 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
 
             val failedAttempts = _failedAuthenticationAttempts.value
             if (isSuccessful || failedAttempts < MAX_FAILED_AUTH_TRIES_BEFORE_LOCKOUT - 1) {
-                AuthenticationResultModel(isSuccessful, lockoutDuration = Duration.ZERO)
+                AuthenticationResultModel(
+                    isSuccessful,
+                    lockoutDuration = Duration.ZERO,
+                    checkedUserId = userId,
+                )
             } else {
-                AuthenticationResultModel(isSuccessful = false, lockoutDuration = LOCKOUT_DURATION)
+                AuthenticationResultModel(
+                    isSuccessful = false,
+                    lockoutDuration = LOCKOUT_DURATION,
+                    checkedUserId = userId,
+                )
             }
         }
     }
@@ -345,7 +365,7 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
                     credential.contentEquals(
                         LockPatternUtils.patternToByteArray(
                             expectedCredential as List<LockPatternView.Cell>,
-                            LockPatternUtils.PATTERN_SIZE_DEFAULT
+                            LockPatternUtils.PATTERN_SIZE_DEFAULT,
                         )
                     )
                 else -> error("Unsupported credential type $type!")
@@ -353,8 +373,13 @@ class FakeAuthenticationRepository(private val currentTimeMs: () -> Long) :
         }
 
         private fun List<AuthenticationPatternCoordinate>.toCells(): List<LockPatternView.Cell> {
-            return map { coordinate -> LockPatternView.Cell.of(
-                coordinate.y, coordinate.x, LockPatternUtils.PATTERN_SIZE_DEFAULT) }
+            return map { coordinate ->
+                LockPatternView.Cell.of(
+                    coordinate.y,
+                    coordinate.x,
+                    LockPatternUtils.PATTERN_SIZE_DEFAULT,
+                )
+            }
         }
     }
 }

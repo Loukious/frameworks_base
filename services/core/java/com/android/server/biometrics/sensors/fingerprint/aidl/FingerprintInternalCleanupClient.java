@@ -18,6 +18,8 @@ package com.android.server.biometrics.sensors.fingerprint.aidl;
 
 import android.annotation.NonNull;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.hardware.biometrics.BiometricAuthenticator;
 import android.hardware.biometrics.BiometricsProtoEnums;
 import android.hardware.fingerprint.Fingerprint;
@@ -56,10 +58,25 @@ public class FingerprintInternalCleanupClient
     }
 
     @Override
+    public void start(@NonNull com.android.server.biometrics.sensors.ClientMonitorCallback callback) {
+        if (SecureSpaceFingerprintPool.isSharedUser(getContext(), getTargetUserId())
+                && SecureSpaceFingerprintPool.hasUnreadableMetadata(getContext(), getSensorId())) {
+            // Unknown ownership must never be converted into deletion of another user's slot.
+            callback.onClientFinished(this, false);
+            return;
+        }
+        super.start(callback);
+    }
+
+    @Override
     protected InternalEnumerateClient<AidlSession> getEnumerateClient(Context context,
             Supplier<AidlSession> lazyDaemon, IBinder token, int userId, String owner,
             List<Fingerprint> enrolledList, BiometricUtils<Fingerprint> utils, int sensorId,
             @NonNull BiometricLogger logger, @NonNull BiometricContext biometricContext) {
+        if (SecureSpaceFingerprintPool.isSharedUser(context, userId)) {
+            enrolledList = SecureSpaceFingerprintPool.allTemplates(context, sensorId);
+            utils = new SharedFingerprintCleanupUtils(sensorId, utils);
+        }
         return new FingerprintInternalEnumerateClient(context, lazyDaemon, token, userId, owner,
                 enrolledList, utils, sensorId,
                 logger.swapAction(context, BiometricsProtoEnums.ACTION_ENUMERATE),
@@ -81,12 +98,15 @@ public class FingerprintInternalCleanupClient
     @Override
     protected void onAddUnknownTemplate(int userId,
             @NonNull BiometricAuthenticator.Identifier identifier) {
+        // Shared-group HAL discovery cannot establish native user/SID ownership.
+        if (SecureSpaceFingerprintPool.isSharedUser(getContext(), userId)) return;
         mBiometricUtils.addBiometricForUser(
                 getContext(), getTargetUserId(), (Fingerprint) identifier);
     }
 
     @Override
     public void handleInvalidBiometricState() {
+        if (SecureSpaceFingerprintPool.isSharedUser(getContext(), getTargetUserId())) return;
         Slog.d(TAG, "Invalid fingerprint user state: delete the state.");
         mBiometricUtils.deleteStateForUser(getTargetUserId());
         BiometricNotificationUtils.showFingerprintLoeNotification(getContext());

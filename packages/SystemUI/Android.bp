@@ -1141,3 +1141,40 @@ filegroup {
         "proguard_kotlin.flags",
     ],
 }
+
+// Focused credential identity and cancellation regressions.
+android_app {
+    name: "SecureSpacesAuthenticationRoboStub",
+    defaults: ["platform_app_defaults"],
+    manifest: "SecureSpacesAuthenticationRoboManifest.xml",
+    min_sdk_version: "35",
+    dont_merge_manifests: true,
+    use_resource_processor: true,
+    resource_dirs: [],
+    static_libs: ["SystemUI-application"],
+    platform_apis: true,
+    certificate: "platform",
+    privileged: true,
+    aaptflags: ["--extra-packages", "com.android.systemui"],
+    optimize: { enabled: false },
+}
+
+android_robolectric_test {
+    name: "SecureSpacesAuthenticationRoboTests",
+    srcs: [
+        "tests/robolectric/src/com/android/systemui/authentication/SecureSpaceAuthenticationIdentityTest.kt",
+        "tests/robolectric/src/com/android/systemui/securespaces/SecureSpaceEntryCoordinatorTest.java",
+        "tests/utils/src/com/android/systemui/authentication/data/repository/FakeAuthenticationRepository.kt",
+    ],
+    defaults: ["systemui-non-platform-apis-defaults"],
+    static_libs: [
+        "SecureSpaceClientProtocolRoboLib",
+        "inline-mockito5-robolectric-prebuilt",
+        "mockito-kotlin-nodeps",
+        "kotlinx_coroutines_test",
+        "android.security.flags-aconfig-java",
+    ],
+    libs: ["truth"],
+    instrumentation_for: "SecureSpacesAuthenticationRoboStub",
+    strict_mode: false,
+}

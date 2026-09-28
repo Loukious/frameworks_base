@@ -1,0 +1,5 @@
+filegroup {
+    name: "secure-auth-duress-codec-sources",
+    srcs: ["SecureAuthDuressCodec.java", "SecureAuthDuressReservation.java"],
+    visibility: ["//frameworks/base/services/tests/secureauthduress"],
+}

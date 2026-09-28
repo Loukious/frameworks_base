@@ -18,6 +18,8 @@ package com.android.server.biometrics.sensors.fingerprint.aidl;
 
 import android.annotation.NonNull;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.os.RemoteException;
 import android.util.Slog;
 
@@ -67,7 +69,8 @@ public class FingerprintGetAuthenticatorIdClient extends HalClientMonitor<AidlSe
     }
 
     void onAuthenticatorIdRetrieved(long authenticatorId) {
-        mAuthenticatorIds.put(getTargetUserId(), authenticatorId);
+        SecureSpaceFingerprintPool.updateAuthenticatorIds(getContext(), getSensorId(),
+                getTargetUserId(), authenticatorId, mAuthenticatorIds);
         mCallback.onClientFinished(this, true /* success */);
     }
 

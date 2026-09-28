@@ -8,6 +8,15 @@ package {
 }
 
 filegroup {
+    name: "secure-space-credential-router-sources",
+    srcs: [
+        "java/com/android/server/locksettings/SecureSpaceCredentialRouter.java",
+        "java/com/android/server/locksettings/SecureSpaceCredentialHandoff.java",
+    ],
+    visibility: ["//frameworks/base/services/tests/servicestests"],
+}
+
+filegroup {
     name: "services.core-sources-am-wm",
     srcs: [
         "java/com/android/server/am/**/*.java",
@@ -365,4 +374,10 @@ cc_library {
         "com.android.media",
     ],
     min_sdk_version: "29",
+}
+
+filegroup {
+    name: "secure-space-fingerprint-policy-sources",
+    srcs: ["java/com/android/server/biometrics/sensors/fingerprint/SecureSpaceFingerprintPolicy.java"],
+    visibility: ["//frameworks/base/services/tests/secureauthfingerprint"],
 }

@@ -20,9 +20,13 @@ import static android.security.Flags.secureLockDevice;
 import static com.android.systemui.DejankUtils.whitelistIpcs;
 
 import android.content.res.Resources;
+import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
+import android.util.Log;
 
+import com.android.internal.widget.ILockSettings;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.systemui.dagger.SysUISingleton;
 import com.android.systemui.dagger.qualifiers.Main;
@@ -36,6 +40,8 @@ import javax.inject.Provider;
 
 @SysUISingleton
 public class KeyguardSecurityModel {
+    private static final String TAG = "KeyguardSecurityModel";
+
     /**
      * The different types of security available.
      * @see KeyguardSecurityContainerController#showSecurityScreen
@@ -50,6 +56,14 @@ public class KeyguardSecurityModel {
         SimPuk, // Unlock by entering a sim puk
         // TODO(b/427071498): remove upon SceneContainerFlag removal
         SecureLockDeviceBiometricAuth // Unlock by authenticating biometric for secure lock device
+    }
+
+    private com.android.systemui.securespaces.SecureSpaceEntryCoordinator mSecureSpaceEntry;
+
+    @Inject
+    void setSecureSpaceEntryCoordinator(
+            com.android.systemui.securespaces.SecureSpaceEntryCoordinator coordinator) {
+        mSecureSpaceEntry = coordinator;
     }
 
     private final boolean mIsPukScreenAvailable;
@@ -124,8 +138,34 @@ public class KeyguardSecurityModel {
             return SecurityMode.SimPin;
         }
 
-        final int credentialType = whitelistIpcs(() ->
-                mLockPatternUtils.getCredentialTypeForUser(userId));
+        final int credentialType = whitelistIpcs(() -> {
+            // Keyguard must reflect the authoritative native credential type. The
+            // LockPatternUtils client cache can be populated before LockSettings has finished
+            // resolving legacy PASSWORD_OR_PIN metadata during boot, leaving SystemUI with a
+            // stale Password result for a real PIN until the cache is invalidated.
+            final ILockSettings lockSettings = ILockSettings.Stub.asInterface(
+                    ServiceManager.getService("lock_settings"));
+            if (lockSettings != null) {
+                try {
+                    final int directCredentialType = lockSettings.getCredentialType(userId);
+                    final int cachedCredentialType =
+                            mLockPatternUtils.getCredentialTypeForUser(userId);
+                    Log.w(TAG, "SecureAuth getSecurityMode userId=" + userId
+                            + " directCredentialType=" + directCredentialType
+                            + " cachedCredentialType=" + cachedCredentialType);
+                    return directCredentialType;
+                } catch (RemoteException ignored) {
+                    // Fall back to the normal cached API if system_server is momentarily
+                    // unavailable; authentication itself still remains fail-closed elsewhere.
+                }
+            }
+            final int cachedCredentialType = mLockPatternUtils.getCredentialTypeForUser(userId);
+            Log.w(TAG, "SecureAuth getSecurityMode fallback userId=" + userId
+                    + " cachedCredentialType=" + cachedCredentialType);
+            return cachedCredentialType;
+        });
+        Log.w(TAG, "SecureAuth getSecurityMode selecting userId=" + userId
+                + " credentialType=" + credentialType);
         switch (credentialType) {
             case LockPatternUtils.CREDENTIAL_TYPE_PIN:
                 return SecurityMode.PIN;

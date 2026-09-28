@@ -24,4 +24,6 @@ enum class AuthenticationResult {
     FAILED,
     /** Authentication was not performed, e.g. due to insufficient input. */
     SKIPPED,
+    /** A native match is completing through the durable user-switch/keyguard policy transaction. */
+    HANDOFF_PENDING,
 }

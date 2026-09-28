@@ -804,3 +804,13 @@ filegroup {
         "docs/docs-samples-redirect.html",
     ],
 }
+
+// Custom platform protocol classes needed by the focused Robolectric tests' stable SDK jar.
+java_library {
+    name: "SecureSpaceClientProtocolRoboLib",
+    srcs: [
+        "core/java/com/android/internal/widget/SecureSpaceCredentialResponse.java",
+        "core/java/com/android/internal/widget/ISecureSpaceCredentialAttempt.aidl",
+    ],
+    visibility: ["//frameworks/base/packages/SystemUI:__pkg__"],
+}

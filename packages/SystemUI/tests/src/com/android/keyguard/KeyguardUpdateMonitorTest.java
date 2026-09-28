@@ -1559,7 +1559,7 @@ public class KeyguardUpdateMonitorTest extends SysuiTestCase {
         serviceInfo.name = cls;
         ResolveInfo resolveInfo = new ResolveInfo();
         resolveInfo.serviceInfo = serviceInfo;
-        when(mPackageManager.resolveService(any(Intent.class), eq(0))).thenReturn(resolveInfo);
+        when(mPackageManager.resolveServiceAsUser(any(Intent.class), eq(0), eq(user))).thenReturn(resolveInfo);
         when(mDevicePolicyManager.isSecondaryLockscreenEnabled(eq(UserHandle.of(user))))
                 .thenReturn(true, false);
         when(mDevicePolicyManager.getProfileOwnerOrDeviceOwnerSupervisionComponent(
@@ -1582,6 +1582,43 @@ public class KeyguardUpdateMonitorTest extends SysuiTestCase {
         // Back to null after another DPM change.
         mKeyguardUpdateMonitor.mBroadcastAllReceiver.onReceive(getContext(), intent);
         mTestableLooper.processAllMessages();
+        assertThat(mKeyguardUpdateMonitor.getSecondaryLockscreenRequirement(user)).isNull();
+    }
+
+    @Test
+    public void routedSecondaryRequirement_resolvesDestinationUser() {
+        int user = 10;
+        ComponentName supervisor = new ComponentName("secure.admin", "Supervisor");
+        when(mDevicePolicyManager.isSecondaryLockscreenEnabled(UserHandle.of(user)))
+                .thenReturn(true);
+        when(mDevicePolicyManager.getProfileOwnerOrDeviceOwnerSupervisionComponent(
+                UserHandle.of(user))).thenReturn(supervisor);
+        ResolveInfo resolved = new ResolveInfo();
+        resolved.serviceInfo = new ServiceInfo();
+        resolved.serviceInfo.packageName = supervisor.getPackageName();
+        resolved.serviceInfo.name = "SecondaryService";
+        when(mPackageManager.resolveServiceAsUser(any(Intent.class), eq(0), eq(user)))
+                .thenReturn(resolved);
+
+        assertThat(mKeyguardUpdateMonitor.refreshSecondaryLockscreenRequirementForSecureEntry(user))
+                .isTrue();
+        verify(mPackageManager).resolveServiceAsUser(any(Intent.class), eq(0), eq(user));
+        assertThat(mKeyguardUpdateMonitor.getSecondaryLockscreenRequirement(user)
+                .getComponent().getPackageName()).isEqualTo("secure.admin");
+    }
+
+    @Test
+    public void routedSecondaryRequirement_missingDestinationServiceFailsClosed() {
+        int user = 10;
+        when(mDevicePolicyManager.isSecondaryLockscreenEnabled(UserHandle.of(user)))
+                .thenReturn(true);
+        when(mDevicePolicyManager.getProfileOwnerOrDeviceOwnerSupervisionComponent(
+                UserHandle.of(user))).thenReturn(new ComponentName("secure.admin", "Supervisor"));
+        when(mPackageManager.resolveServiceAsUser(any(Intent.class), eq(0), eq(user)))
+                .thenReturn(null);
+
+        assertThat(mKeyguardUpdateMonitor.refreshSecondaryLockscreenRequirementForSecureEntry(user))
+                .isFalse();
         assertThat(mKeyguardUpdateMonitor.getSecondaryLockscreenRequirement(user)).isNull();
     }
 

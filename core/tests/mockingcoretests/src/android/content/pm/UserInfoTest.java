@@ -67,6 +67,15 @@ public final class UserInfoTest {
             .build();
 
     @Test
+    public void secureSpace_nativeSwitchSupported_butExcludedFromPublicSwitcher() {
+        UserInfo user = createTestUserInfo(
+                android.os.UserManager.USER_TYPE_FULL_SECURE_SPACE, FLAG_FULL);
+        expect.that(user.isFull()).isTrue();
+        expect.that(user.supportsSwitchTo()).isTrue();
+        expect.that(user.isUiSwitchableHumanUser()).isFalse();
+    }
+
+    @Test
     public void testSimple() throws Exception {
         UserInfo ui = createTestUserInfo(FLAG_GUEST);
 

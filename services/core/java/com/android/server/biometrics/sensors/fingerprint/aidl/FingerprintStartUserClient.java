@@ -19,6 +19,8 @@ package com.android.server.biometrics.sensors.fingerprint.aidl;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.hardware.biometrics.fingerprint.IFingerprint;
 import android.hardware.biometrics.fingerprint.ISession;
 import android.hardware.biometrics.fingerprint.ISessionCallback;
@@ -61,7 +63,8 @@ public class FingerprintStartUserClient extends StartUserClient<IFingerprint, IS
             final IFingerprint hal = getFreshDaemon();
             final int version = hal.getInterfaceVersion();
             final ISession newSession = hal.createSession(getSensorId(),
-                    getTargetUserId(), mSessionCallback);
+                    SecureSpaceFingerprintPool.hardwareUserId(getContext(), getTargetUserId()),
+                    mSessionCallback);
             Binder.allowBlocking(newSession.asBinder());
             mUserStartedCallback.onUserStarted(getTargetUserId(), newSession, version);
             getCallback().onClientFinished(this, true /* success */);

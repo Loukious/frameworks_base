@@ -52,11 +52,13 @@ import com.android.systemui.scene.shared.model.Scenes
 import com.android.systemui.shade.ShadeDisplayAware
 import com.android.systemui.utils.coroutines.flow.flatMapLatestConflated
 import com.android.text.flags.Flags as TextFlags
+import com.android.systemui.securespaces.SecureSpaceEntryCoordinator
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -85,6 +87,31 @@ constructor(
 ) {
     private val _onIncorrectBouncerInput = MutableSharedFlow<Unit>()
     val onIncorrectBouncerInput: SharedFlow<Unit> = _onIncorrectBouncerInput
+
+    private var secureSpaceEntry: SecureSpaceEntryCoordinator? = null
+    private val _secondaryPolicyVisible = MutableStateFlow(false)
+    val secondaryPolicyVisible: StateFlow<Boolean> = _secondaryPolicyVisible.asStateFlow()
+    private val secondaryPolicyListener = java.util.function.Consumer<Boolean> {
+        _secondaryPolicyVisible.value = it
+    }
+
+
+    @Inject
+    fun setSecureSpaceEntryCoordinator(coordinator: SecureSpaceEntryCoordinator) {
+        secureSpaceEntry?.removeSecondaryPolicyListener(secondaryPolicyListener)
+        secureSpaceEntry = coordinator
+        coordinator.addSecondaryPolicyListener(secondaryPolicyListener)
+    }
+
+    fun registerSecondaryPolicyHost(host: androidx.constraintlayout.widget.ConstraintLayout) {
+        secureSpaceEntry?.registerSecondaryPolicyHost(host)
+    }
+    fun unregisterSecondaryPolicyHost(host: androidx.constraintlayout.widget.ConstraintLayout) {
+        secureSpaceEntry?.unregisterSecondaryPolicyHost(host)
+    }
+
+    fun cancelSecureSpaceEntry() { secureSpaceEntry?.cancel() }
+    fun onSecureSpaceSourcePaused() { secureSpaceEntry?.onSourcePaused() }
 
     /** Whether the auto confirm feature is enabled for the currently-selected user. */
     val isAutoConfirmEnabled: StateFlow<Boolean> = authenticationInteractor.isAutoConfirmEnabled
@@ -250,6 +277,7 @@ constructor(
      * user's pocket or by the user's face while holding their device up to their ear.
      */
     fun onIntentionalUserInput() {
+        secureSpaceEntry?.cancel()
         deviceEntryFaceAuthInteractor.onPrimaryBouncerUserInput()
         powerInteractor.onUserTouch()
         falsingInteractor.updateFalseConfidence(FalsingClassifier.Result.passed(0.6))
@@ -377,6 +405,7 @@ constructor(
 
     /** Notifies that the input method editor (software keyboard) has been hidden by the user. */
     suspend fun onImeHiddenByUser() {
+        secureSpaceEntry?.cancel()
         _onImeHiddenByUser.emit(Unit)
     }
 

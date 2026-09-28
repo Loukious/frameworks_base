@@ -31,6 +31,7 @@ import static android.os.UserManager.USER_TYPE_FULL_DEMO;
 import static android.os.UserManager.USER_TYPE_FULL_GUEST;
 import static android.os.UserManager.USER_TYPE_FULL_RESTRICTED;
 import static android.os.UserManager.USER_TYPE_FULL_SECONDARY;
+import static android.os.UserManager.USER_TYPE_FULL_SECURE_SPACE;
 import static android.os.UserManager.USER_TYPE_FULL_SYSTEM;
 import static android.os.UserManager.USER_TYPE_PROFILE_CLONE;
 import static android.os.UserManager.USER_TYPE_PROFILE_COMMUNAL;
@@ -115,6 +116,8 @@ public final class UserTypeFactory {
         builders.put(USER_TYPE_PROFILE_MANAGED, getDefaultTypeProfileManaged());
         builders.put(USER_TYPE_FULL_SYSTEM, getDefaultTypeFullSystem());
         builders.put(USER_TYPE_FULL_SECONDARY, getDefaultTypeFullSecondary());
+        builders.put(USER_TYPE_FULL_SECURE_SPACE,
+                getDefaultTypeFullSecondary().setName(USER_TYPE_FULL_SECURE_SPACE));
         builders.put(USER_TYPE_FULL_GUEST, getDefaultTypeFullGuest());
         builders.put(USER_TYPE_FULL_DEMO, getDefaultTypeFullDemo());
         builders.put(USER_TYPE_FULL_RESTRICTED, getDefaultTypeFullRestricted());

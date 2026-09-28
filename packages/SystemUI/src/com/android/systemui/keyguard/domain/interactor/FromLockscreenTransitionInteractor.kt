@@ -18,8 +18,11 @@ package com.android.systemui.keyguard.domain.interactor
 
 import android.animation.ValueAnimator
 import android.util.MathUtils
+import android.util.Log
 import com.android.app.animation.Interpolators
 import com.android.app.tracing.coroutines.launchTraced as launch
+import com.android.systemui.bouncer.domain.interactor.PrimaryBouncerInteractor
+import com.android.systemui.bouncer.shared.constants.KeyguardBouncerConstants
 import com.android.systemui.communal.domain.interactor.CommunalSceneInteractor
 import com.android.systemui.communal.domain.interactor.CommunalSettingsInteractor
 import com.android.systemui.communal.shared.model.CommunalScenes
@@ -51,6 +54,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.withContext
 
 @SysUISingleton
 class FromLockscreenTransitionInteractor
@@ -62,7 +66,7 @@ constructor(
     @Background private val scope: CoroutineScope,
     @Application private val applicationScope: CoroutineScope,
     @Background bgDispatcher: CoroutineDispatcher,
-    @Main mainDispatcher: CoroutineDispatcher,
+    @Main private val uiDispatcher: CoroutineDispatcher,
     keyguardInteractor: KeyguardInteractor,
     private val shadeRepository: ShadeRepository,
     powerInteractor: PowerInteractor,
@@ -70,11 +74,12 @@ constructor(
     private val communalSceneInteractor: CommunalSceneInteractor,
     private val swipeToDismissInteractor: SwipeToDismissInteractor,
     keyguardOcclusionInteractor: KeyguardOcclusionInteractor,
+    private val primaryBouncerInteractor: PrimaryBouncerInteractor,
 ) :
     TransitionInteractor(
         fromState = KeyguardState.LOCKSCREEN,
         transitionInteractor = transitionInteractor,
-        mainDispatcher = mainDispatcher,
+        mainDispatcher = uiDispatcher,
         bgDispatcher = bgDispatcher,
         powerInteractor = powerInteractor,
         keyguardOcclusionInteractor = keyguardOcclusionInteractor,
@@ -170,6 +175,23 @@ constructor(
     private fun listenForLockscreenToPrimaryBouncerDragging() {
         if (SceneContainerFlag.isEnabled) return
         var transitionId: UUID? = null
+        // The manual shade collector can be suspended while the transition repository still
+        // accepts and emits the transition. Listen to the authoritative transition stream as a
+        // fallback so the legacy credential container cannot be left invisible.
+        scope.launch("$TAG#repairPrimaryBouncerFromTransition") {
+            transitionInteractor.transitionState
+                .filter {
+                    it.from == KeyguardState.LOCKSCREEN &&
+                        it.to == KeyguardState.PRIMARY_BOUNCER &&
+                        (it.transitionState == TransitionState.STARTED ||
+                            it.transitionState == TransitionState.RUNNING)
+                }
+                .collect {
+                    withContext(uiDispatcher) {
+                        updateLegacyPrimaryBouncer(KeyguardBouncerConstants.EXPANSION_VISIBLE)
+                    }
+                }
+        }
         applicationScope.launch("$TAG#listenForLockscreenToPrimaryBouncerDragging") {
             shadeRepository.legacyShadeExpansion.collect { shadeExpansion ->
                 val statusBarState = keyguardInteractor.statusBarState.value
@@ -182,6 +204,7 @@ constructor(
                     internalTransitionInteractor.currentTransitionInfoInternal()
                 if (id != null) {
                     if (startedStep.to == KeyguardState.PRIMARY_BOUNCER) {
+                        updateLegacyPrimaryBouncer(shadeExpansion)
                         // An existing `id` means a transition is started, and calls to
                         // `updateTransition` will control it until FINISHED or CANCELED
                         var nextState =
@@ -251,6 +274,9 @@ constructor(
                                 animator = null, // transition will be manually controlled,
                                 ownerReason = "#listenForLockscreenToPrimaryBouncerDragging",
                             )
+                        if (transitionId != null) {
+                            updateLegacyPrimaryBouncer(shadeExpansion)
+                        }
                     }
                 }
             }
@@ -266,6 +292,32 @@ constructor(
                 }
                 .collect { transitionId = null }
         }
+    }
+
+    /**
+     * The legacy PIN/password view and the keyguard transition are backed by separate state
+     * repositories. Keep them in lockstep here because this collector owns the manually driven
+     * LOCKSCREEN -> PRIMARY_BOUNCER transition. In particular, a completed biometric dismissal
+     * can recreate the lockscreen with the transition state ready while the legacy bouncer is
+     * still hidden; advancing only the transition then produces an invisible credential view.
+     */
+    private fun updateLegacyPrimaryBouncer(shadeExpansion: Float) {
+        Log.i(
+            TAG,
+            "legacy bouncer bridge expansion=$shadeExpansion showing=" +
+                primaryBouncerInteractor.isShowing.value + " showingSoon=" +
+                primaryBouncerInteractor.isShowingSoon.value,
+        )
+        // showingSoon is only a pending callback; after a biometric dismissal it can remain set
+        // while the actual legacy container is invisible. Retry show() based on the real visible
+        // state so the transition cannot finish with an invisible PIN view.
+        if (!primaryBouncerInteractor.isShowing.value) {
+            primaryBouncerInteractor.show(
+                isScrimmed = false,
+                reason = "$TAG#listenForLockscreenToPrimaryBouncerDragging",
+            )
+        }
+        primaryBouncerInteractor.setPanelExpansion(shadeExpansion)
     }
 
     fun dismissKeyguard() {

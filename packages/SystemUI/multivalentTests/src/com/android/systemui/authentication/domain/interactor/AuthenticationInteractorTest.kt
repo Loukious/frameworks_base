@@ -17,6 +17,7 @@
 package com.android.systemui.authentication.domain.interactor
 
 import android.app.admin.DevicePolicyManager
+import android.content.pm.UserInfo
 import android.platform.test.annotations.DisableFlags
 import android.platform.test.annotations.EnableFlags
 import android.security.Flags.FLAG_LOCKSCREEN_INDICATE_DUPLICATE_GUESSES
@@ -113,7 +114,7 @@ class AuthenticationInteractorTest : SysuiTestCase() {
         }
 
     @Test
-    fun authenticate_withCorrectPin_succeeds_throughEarlyMatch() =
+    fun authenticate_withCorrectPin_waitsForFullResult() =
         kosmos.runTest {
             kosmos.fakeAuthenticationRepository.setAuthenticationMethod(Pin)
             val completableDeferred = kosmos.fakeAuthenticationRepository.deferFullSuccessResult()
@@ -124,11 +125,54 @@ class AuthenticationInteractorTest : SysuiTestCase() {
                     underTest.authenticate(FakeAuthenticationRepository.DEFAULT_PIN)
                 }
             runCurrent()
-            assertThat(onAuthenticationResult).isTrue()
+            assertThat(onAuthenticationResult).isNull()
 
             assertThat(job.isActive).isTrue()
             completableDeferred.complete(Unit)
             job.join()
+            assertThat(onAuthenticationResult).isTrue()
+        }
+
+    @Test
+    fun authenticate_userChangesWhileVerifying_doesNotDismissNewUser() =
+        kosmos.runTest {
+            val deferred = kosmos.fakeAuthenticationRepository.deferFullSuccessResult()
+            var result: AuthenticationResult? = null
+            val job =
+                testScope.launch {
+                    result = underTest.authenticate(FakeAuthenticationRepository.DEFAULT_PIN)
+                }
+            runCurrent()
+            assertThat(onAuthenticationResult).isNull()
+            kosmos.fakeUserRepository.setSelectedUserInfo(UserInfo(10, "other", 0))
+            deferred.complete(Unit)
+            job.join()
+
+            assertThat(result).isEqualTo(AuthenticationResult.SKIPPED)
+            assertThat(onAuthenticationResult).isNull()
+            assertThat(kosmos.fakeAuthenticationRepository.lastReportedUserId).isEqualTo(0)
+            Assert.assertThrows(IllegalStateException::class.java) {
+                kosmos.fakeAuthenticationRepository.lastCheckedCredential!!.credential
+            }
+        }
+
+    @Test
+    fun authenticate_cancelledAfterEarlyMatch_neverDismissesAndClearsCredential() =
+        kosmos.runTest {
+            kosmos.fakeAuthenticationRepository.deferFullSuccessResult()
+            val job =
+                testScope.launch {
+                    underTest.authenticate(FakeAuthenticationRepository.DEFAULT_PIN)
+                }
+            runCurrent()
+            job.cancel()
+            job.join()
+
+            assertThat(onAuthenticationResult).isNull()
+            assertThat(kosmos.fakeAuthenticationRepository.lastReportedUserId).isNull()
+            Assert.assertThrows(IllegalStateException::class.java) {
+                kosmos.fakeAuthenticationRepository.lastCheckedCredential!!.credential
+            }
         }
 
     @Test
@@ -309,7 +353,7 @@ class AuthenticationInteractorTest : SysuiTestCase() {
             kosmos.fakeAuthenticationRepository.apply {
                 setAuthenticationMethod(Pin)
                 setAutoConfirmFeatureEnabled(true)
-                reportLockoutStarted(42.milliseconds)
+                reportLockoutStarted(42.milliseconds, userId = 0)
             }
 
             val correctPin = FakeAuthenticationRepository.DEFAULT_PIN

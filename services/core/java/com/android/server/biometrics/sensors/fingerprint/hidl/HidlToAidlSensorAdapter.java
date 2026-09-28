@@ -19,6 +19,8 @@ package com.android.server.biometrics.sensors.fingerprint.hidl;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.content.pm.UserInfo;
 import android.hardware.biometrics.fingerprint.ISession;
 import android.hardware.biometrics.fingerprint.SensorProps;
@@ -181,7 +183,8 @@ public class HidlToAidlSensorAdapter extends Sensor implements IHwBinder.DeathRe
             return mSession;
         } else {
             return mSession = new AidlSession(this::getIBiometricsFingerprint,
-                    mCurrentUserId, getAidlResponseHandler());
+                    mCurrentUserId, getAidlResponseHandler(),
+                    SecureSpaceFingerprintPool.hardwareUserId(getContext(), mCurrentUserId));
         }
     }
 

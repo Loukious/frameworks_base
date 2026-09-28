@@ -2,6 +2,18 @@
 // Build FrameworksServicesTests package
 //########################################################################
 
+java_test_host {
+    name: "SecureSpaceCredentialRouterTests",
+    test_config: "SecureSpaceCredentialRouterTests.xml",
+    srcs: [
+        ":secure-space-credential-router-sources",
+        "src/com/android/server/locksettings/SecureSpaceCredentialRouterTest.java",
+        "src/com/android/server/locksettings/SecureSpaceCredentialHandoffTest.java",
+    ],
+    static_libs: ["junit"],
+    test_suites: ["general-tests"],
+}
+
 java_defaults {
     name: "FrameworksServicesTests-jni-defaults",
     jni_libs: [

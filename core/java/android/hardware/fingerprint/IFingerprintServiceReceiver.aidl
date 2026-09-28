@@ -33,4 +33,6 @@ oneway interface IFingerprintServiceReceiver {
     void onUdfpsPointerDown(int sensorId);
     void onUdfpsPointerUp(int sensorId);
     void onUdfpsOverlayShown();
+    void onSecureSpaceAuthenticationSucceeded(IBinder token, int originUserId, int originSerial,
+            int destinationUserId, int destinationSerial, boolean strongBiometric);
 }

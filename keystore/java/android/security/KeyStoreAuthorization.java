@@ -76,6 +76,19 @@ public class KeyStoreAuthorization {
      * @param authToken
      * @return 0 if successful or a {@code ResponseCode}.
      */
+    /** @hide Adds unchanged signed hardware proof for its native user/profile namespace. */
+    public int addAuthTokenForUsers(@NonNull int[] userIds, @NonNull byte[] authToken) {
+        StrictMode.noteSlowCall("addAuthTokenForUsers");
+        try {
+            getService().addAuthTokenForUsers(userIds, AuthTokenUtils.toHardwareAuthToken(authToken));
+            return 0;
+        } catch (RemoteException | NullPointerException e) {
+            return SYSTEM_ERROR;
+        } catch (ServiceSpecificException e) {
+            return e.errorCode;
+        }
+    }
+
     public int addAuthToken(@NonNull byte[] authToken) {
         return addAuthToken(AuthTokenUtils.toHardwareAuthToken(authToken));
     }

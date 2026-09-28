@@ -507,12 +507,16 @@ class PasswordBouncerViewModelTest : SysuiTestCase() {
         if (isLockedOut) {
             repeat(failedAttemptCount) {
                 fakeAuthenticationRepository.reportAuthenticationAttempt(
-                    AuthenticationResult.FAILED
+                    AuthenticationResult.FAILED,
+                    userId = 0,
                 )
             }
-            fakeAuthenticationRepository.reportLockoutStarted(30.seconds)
+            fakeAuthenticationRepository.reportLockoutStarted(30.seconds, userId = 0)
         } else {
-            fakeAuthenticationRepository.reportAuthenticationAttempt(AuthenticationResult.SUCCEEDED)
+            fakeAuthenticationRepository.reportAuthenticationAttempt(
+                AuthenticationResult.SUCCEEDED,
+                userId = 0,
+            )
         }
         isInputEnabled.value = !isLockedOut
 

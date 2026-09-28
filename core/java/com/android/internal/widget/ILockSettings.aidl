@@ -16,6 +16,9 @@
 
 package com.android.internal.widget;
 
+import com.android.internal.widget.ISecureSpaceCredentialAttempt;
+
+import android.os.IBinder;
 import android.app.PendingIntent;
 import android.app.RemoteLockscreenValidationResult;
 import android.app.RemoteLockscreenValidationSession;
@@ -31,6 +34,7 @@ import com.android.internal.widget.IWeakEscrowTokenActivatedListener;
 import com.android.internal.widget.IWeakEscrowTokenRemovedListener;
 import com.android.internal.widget.LockscreenCredential;
 import com.android.internal.widget.VerifyCredentialResponse;
+import com.android.internal.widget.SecureSpaceCredentialResponse;
 
 import java.util.Map;
 
@@ -115,4 +119,20 @@ interface ILockSettings {
     void unlockUserKeyIfUnsecured(int userId);
     boolean writeRepairModeCredential(int userId);
     byte getLockPatternSize(int userId);
+    // Append extensions to preserve existing transaction IDs for vendor clients.
+    SecureSpaceCredentialResponse checkSecureSpaceCredential(in LockscreenCredential credential,
+            int expectedUserId, int expectedSerialNumber, ISecureSpaceCredentialAttempt attempt);
+    boolean prepareSecureSpaceCredentialHandoff(IBinder token);
+    boolean consumeSecureSpaceCredentialHandoff(IBinder token, int userId, int serialNumber);
+    void cancelSecureSpaceCredentialHandoff(IBinder token);
+    void setSecureAuthDuressCredentials(in LockscreenCredential ownerCredential,
+            in LockscreenCredential pin, in LockscreenCredential password);
+    boolean hasSecureAuthDuressCredentials(in LockscreenCredential ownerCredential);
+    boolean setInitialSecureSpaceCredential(in LockscreenCredential ownerCredential,
+            in LockscreenCredential credential, int userId, int serialNumber);
+    boolean isSecureSpaceAuthenticationLeaseCurrent(IBinder token, int userId, int serialNumber);
+    boolean isSecureAuthErasurePending();
+    boolean attachSecureSpaceFingerprintWitness(IBinder token, int originUserId, int originSerial,
+            int destinationUserId, int destinationSerial, ISecureSpaceCredentialAttempt witness);
+    boolean consumeSecureSpaceFingerprintHandoff(IBinder token, int userId, int serialNumber);
 }

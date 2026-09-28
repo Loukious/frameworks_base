@@ -131,16 +131,26 @@ class UserSwitchingDialog extends Dialog {
         setCancelable(false);
         setContentView(R.layout.user_switching_dialog);
 
+        final boolean concealIdentity = involvesSecureSpace();
+
         final TextView textView = findViewById(R.id.message);
         if (textView != null) {
-            final String message = getTextMessage();
-            textView.setAccessibilityPaneTitle(message);
-            textView.setText(message);
+            if (concealIdentity) {
+                textView.setVisibility(View.GONE);
+            } else {
+                final String message = getTextMessage();
+                textView.setAccessibilityPaneTitle(message);
+                textView.setText(message);
+            }
         }
 
         final ImageView imageView = findViewById(R.id.icon);
         if (imageView != null) {
-            imageView.setImageBitmap(getUserIconRounded());
+            if (concealIdentity) {
+                imageView.setVisibility(View.GONE);
+            } else {
+                imageView.setImageBitmap(getUserIconRounded());
+            }
         }
 
         final ImageView progressCircular = findViewById(R.id.progress_circular);
@@ -153,6 +163,11 @@ class UserSwitchingDialog extends Dialog {
                 progressCircular.setColorFilter(value.data);
             }
         }
+    }
+
+    private boolean involvesSecureSpace() {
+        return UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(mOldUser.userType)
+                || UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(mNewUser.userType);
     }
 
     private Bitmap getUserIconRounded() {

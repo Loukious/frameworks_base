@@ -1,0 +1,5 @@
+filegroup {
+    name: "secure-auth-key-erasure-sources",
+    srcs: ["SecureAuthKeyErasure.java"],
+    visibility: ["//frameworks/base/services/tests/secureauth"],
+}

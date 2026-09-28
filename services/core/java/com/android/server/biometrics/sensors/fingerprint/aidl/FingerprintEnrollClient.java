@@ -25,6 +25,9 @@ import static android.hardware.fingerprint.FingerprintManager.getErrorString;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
+import com.android.server.LocalServices;
+import com.android.server.locksettings.LockSettingsInternal;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
 import android.hardware.biometrics.BiometricAuthenticator;
 import android.hardware.biometrics.BiometricFingerprintConstants;
 import android.hardware.biometrics.BiometricFingerprintConstants.FingerprintAcquired;
@@ -143,8 +146,24 @@ public class FingerprintEnrollClient extends EnrollClient<AidlSession> implement
                 getBiometricContextUnsubscriber(), callback);
     }
 
+    private LockSettingsInternal.SecureSpaceFingerprintIdentity mEnrollmentIdentity;
+
     @Override
     public void onEnrollResult(BiometricAuthenticator.Identifier identifier, int remaining) {
+        if (remaining == 0 && mEnrollmentIdentity != null) {
+            var locks = LocalServices.getService(LockSettingsInternal.class);
+            int id = identifier.getBiometricId();
+            boolean collision = SecureSpaceFingerprintPool.allTemplates(getContext(), getSensorId())
+                    .stream().anyMatch(f -> f.getBiometricId() == id);
+            if (id == 0 || collision || locks == null
+                    || !locks.recordSecureSpaceFingerprintEnrollment(getSensorId(), id,
+                            mEnrollmentIdentity)) {
+                // Never remove a collision: the slot could belong to a different native user.
+                onError(BiometricFingerprintConstants.FINGERPRINT_ERROR_UNABLE_TO_PROCESS, 0);
+                mCallback.onClientFinished(this, false);
+                return;
+            }
+        }
         super.onEnrollResult(identifier, remaining);
 
         mSensorOverlays.ifUdfps(
@@ -220,12 +239,33 @@ public class FingerprintEnrollClient extends EnrollClient<AidlSession> implement
 
     @Override
     protected boolean hasReachedEnrollmentLimit() {
+        if (SecureSpaceFingerprintPool.isSharedUser(getContext(), getTargetUserId())) {
+            return SecureSpaceFingerprintPool.allTemplates(getContext(), getSensorId()).size()
+                    >= mMaxTemplatesPerUser;
+        }
         return mBiometricUtils.getBiometricsForUser(getContext(), getTargetUserId()).size()
                 >= mMaxTemplatesPerUser;
     }
 
     @Override
     protected void startHalOperation() {
+        if (SecureSpaceFingerprintPool.isSharedUser(getContext(), getTargetUserId())
+                && (getTargetUserId() != 0
+                || SecureSpaceFingerprintPool.hasConcealedUsers(getContext()))) {
+            var locks = LocalServices.getService(LockSettingsInternal.class);
+            mEnrollmentIdentity = locks == null ? null
+                    : locks.getSecureSpaceFingerprintIdentity(getTargetUserId());
+            boolean validToken = mHardwareAuthToken != null && mHardwareAuthToken.length == 69
+                    && mHardwareAuthToken[0] == 0;
+            var hat = validToken ? HardwareAuthTokenUtils.toHardwareAuthToken(mHardwareAuthToken)
+                    : null;
+            if (mEnrollmentIdentity == null || !mEnrollmentIdentity.storageUnlocked()
+                    || hat == null || hat.userId != mEnrollmentIdentity.secureUserId()) {
+                onError(BiometricFingerprintConstants.FINGERPRINT_ERROR_UNABLE_TO_PROCESS, 0);
+                mCallback.onClientFinished(this, false);
+                return;
+            }
+        }
         mSensorOverlays.show(getSensorId(),
                 getRequestReasonFromFingerprintEnrollReason(mEnrollReason), this);
         mAuthenticationStateListeners.onAuthenticationStarted(new AuthenticationStartedInfo

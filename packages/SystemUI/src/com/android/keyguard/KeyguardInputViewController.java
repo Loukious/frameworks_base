@@ -216,6 +216,20 @@ public abstract class KeyguardInputViewController<T extends KeyguardInputView>
 
     /** Factory for a {@link KeyguardInputViewController}. */
     public static class Factory {
+        private com.android.systemui.securespaces.SecureSpaceEntryCoordinator mSecureSpaceEntry;
+
+        @Inject
+        void setSecureSpaceEntryCoordinator(
+                com.android.systemui.securespaces.SecureSpaceEntryCoordinator coordinator) {
+            mSecureSpaceEntry = coordinator;
+        }
+
+        private <V extends KeyguardAbsKeyInputView> KeyguardAbsKeyInputViewController<V>
+                configureSecureEntry(KeyguardAbsKeyInputViewController<V> controller) {
+            controller.setSecureSpaceEntryCoordinator(mSecureSpaceEntry);
+            return controller;
+        }
+
         private final SecureLockDeviceBiometricAuthContentViewModel.Factory
                 mSecureLockDeviceViewModelFactory;
         private final KeyguardUpdateMonitor mKeyguardUpdateMonitor;
@@ -312,23 +326,23 @@ public abstract class KeyguardInputViewController<T extends KeyguardInputView>
                         mDevicePostureController, mFeatureFlags, mSelectedUserInteractor,
                         mBouncerHapticPlayer, mUiLatencyStatsManager);
             } else if (keyguardInputView instanceof KeyguardPasswordView) {
-                return new KeyguardPasswordViewController((KeyguardPasswordView) keyguardInputView,
+                return configureSecureEntry(new KeyguardPasswordViewController((KeyguardPasswordView) keyguardInputView,
                         mKeyguardUpdateMonitor, securityMode, mLockPatternUtils,
                         keyguardSecurityCallback, mMessageAreaControllerFactory, mLatencyTracker,
                         mInputMethodManager, emergencyButtonController, mMainExecutor, mResources,
                         mFalsingCollector, mKeyguardViewController,
                         mDevicePostureController, mFeatureFlags, mSelectedUserInteractor,
                         mKeyguardKeyboardInteractor, mBouncerHapticPlayer, mUserActivityNotifier,
-                        mLockPatternCheckerWrapper, mUiLatencyStatsManager);
+                        mLockPatternCheckerWrapper, mUiLatencyStatsManager));
             } else if (keyguardInputView instanceof KeyguardPINView) {
-                return new KeyguardPinViewController((KeyguardPINView) keyguardInputView,
+                return configureSecureEntry(new KeyguardPinViewController((KeyguardPINView) keyguardInputView,
                         mKeyguardUpdateMonitor, securityMode, mLockPatternUtils,
                         keyguardSecurityCallback, mMessageAreaControllerFactory, mLatencyTracker,
                         emergencyButtonController, mFalsingCollector,
                         mDevicePostureController, mFeatureFlags, mSelectedUserInteractor,
                         mUiEventLogger, mKeyguardKeyboardInteractor, mBouncerHapticPlayer,
                         mUserActivityNotifier, mInputManager, mLockPatternCheckerWrapper,
-                        mUiLatencyStatsManager);
+                        mUiLatencyStatsManager));
             } else if (keyguardInputView instanceof KeyguardSimPinView) {
                 return new KeyguardSimPinViewController((KeyguardSimPinView) keyguardInputView,
                         mKeyguardUpdateMonitor, securityMode, mLockPatternUtils,

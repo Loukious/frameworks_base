@@ -250,6 +250,7 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
         @Override
         public boolean dismiss(boolean authenticated, int targetId,
                 boolean bypassSecondaryLockScreen, SecurityMode expectedSecurityMode) {
+        if (mSecureSpaceEntry != null && mSecureSpaceEntry.isErasurePending()) return false;
             return showNextSecurityScreenOrFinish(
                     authenticated, targetId, bypassSecondaryLockScreen, expectedSecurityMode);
         }
@@ -338,6 +339,7 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
 
         @Override
         public void onCancelClicked() {
+            if (mSecureSpaceEntry != null) mSecureSpaceEntry.cancel();
             mViewMediatorCallback.onCancelClicked();
         }
 
@@ -350,6 +352,20 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
          */
         @Override
         public void finish(int targetUserId) {
+            if (mSecureSpaceEntry != null && mSecureSpaceEntry.isErasurePending()) return;
+            if (mRoutedPrimaryUser != -1 && (mSecureSpaceEntry == null
+                    || !mSecureSpaceEntry.isPublishedAuthenticationCurrent(
+                            mRoutedPrimaryUser, mRoutedPrimarySerial))) return;
+            if (mSecureSpaceEntry != null && mSecureSpaceEntry.isAwaitingPolicy()
+                    && !mRoutedPolicyAllowsFinish) return;
+            if (mRoutedPrimaryUser != -1 && (!mRoutedPolicyAllowsFinish
+                    || targetUserId != mRoutedPrimaryUser
+                    || mSelectedUserInteractor.getSelectedUserId() != targetUserId)) return;
+            if (mRoutedBiometric && !mRoutedBiometricReported) {
+                mRoutedBiometricReported = true;
+                mUpdateMonitor.reportSecureSpaceFingerprintAccepted(targetUserId,
+                        mRoutedStrongBiometric);
+            }
             if (!SceneContainerFlag.isEnabled()) {
                 // If there's a pending runnable because the user interacted with a widget
                 // and we're leaving keyguard, then run it.
@@ -487,6 +503,109 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
     private final Provider<DeviceEntryInteractor> mDeviceEntryInteractor;
     private final Provider<JavaAdapter> mJavaAdapter;
     private final DeviceProvisionedController mDeviceProvisionedController;
+    private com.android.systemui.securespaces.SecureSpaceEntryCoordinator mSecureSpaceEntry;
+    private int mRoutedPrimaryUser = -1;
+    private int mRoutedPrimarySerial = -1;
+    private boolean mRoutedPolicyAllowsFinish;
+    private boolean mRoutedSecondaryRequested;
+    private boolean mRoutedBiometric;
+    private boolean mRoutedStrongBiometric;
+    private boolean mRoutedBiometricReported;
+    private dagger.Lazy<com.android.systemui.scene.domain.interactor.SceneInteractor>
+            mSecureSpaceSceneInteractor;
+
+    @Inject
+    void setSecureSpaceSceneInteractor(
+            dagger.Lazy<com.android.systemui.scene.domain.interactor.SceneInteractor> scenes) {
+        mSecureSpaceSceneInteractor = scenes;
+    }
+    private boolean mCompletingRoutedSecondary;
+    private final com.android.systemui.securespaces.SecureSpaceEntryCoordinator.Host
+            mSecureSpaceHost = new com.android.systemui.securespaces.SecureSpaceEntryCoordinator.Host() {
+        @Override
+        public boolean isReady(int userId, int serialNumber) {
+            if (mSelectedUserInteractor.getSelectedUserId() != userId
+                    || !mView.isAttachedToWindow()) return false;
+            if (!mUpdateMonitor.refreshSecondaryLockscreenRequirementForSecureEntry(userId)) {
+                return false;
+            }
+            if (SceneContainerFlag.isEnabled()
+                    && mUpdateMonitor.getSecondaryLockscreenRequirement(userId) != null) {
+                androidx.constraintlayout.widget.ConstraintLayout parent =
+                        mSecureSpaceEntry.getSecondaryPolicyHost();
+                if (parent == null) {
+                    if (mSecureSpaceSceneInteractor != null) {
+                        mSecureSpaceSceneInteractor.get().showOverlay(
+                                com.android.systemui.scene.shared.model.Overlays.Bouncer,
+                                "secondary lockscreen policy");
+                    }
+                    return false;
+                }
+                mAdminSecondaryLockScreenController.setParent(parent);
+            }
+            SecurityMode mode = mSecurityModel.getSecurityMode(userId);
+            if (mode != PIN && mode != Password) return false;
+            if (getCurrentSecurityMode() != mode) {
+                showPrimarySecurityScreen(false);
+                return false;
+            }
+            return true;
+        }
+        @Override
+        public void onPrimaryAuthenticationRevoked(int userId, int serialNumber) {
+            boolean revokesCurrentRoute = mRoutedPrimaryUser == userId
+                    && mRoutedPrimarySerial == serialNumber;
+            if (revokesCurrentRoute) {
+                mRoutedPrimaryUser = -1;
+                mRoutedPrimarySerial = -1;
+                mRoutedPolicyAllowsFinish = false;
+                mRoutedSecondaryRequested = false;
+                mRoutedBiometric = false;
+                mAdminSecondaryLockScreenController.hide();
+            }
+            if (mSelectedUserInteractor.getSelectedUserId() != userId
+                    || !mView.isAttachedToWindow()) return;
+            // A routed result can be revoked after the legacy bouncer has already started its
+            // disappear animation. onPause() clears the routed fields as the bouncer hides, so
+            // cleanup must also run when those fields no longer identify the published proof.
+            // PrimaryBouncerInteractor deliberately blocks future shows while that animation is
+            // pending; hide() clears it and restores the normal lockscreen -> bouncer path.
+            if (!SceneContainerFlag.isEnabled()) mPrimaryBouncerInteractor.get().hide();
+            showPrimarySecurityScreen(false);
+        }
+        @Override
+        public void completePrimaryAuthentication(int userId, int serialNumber) {
+            if (!isReady(userId, serialNumber)) return;
+            mRoutedPrimaryUser = userId;
+            mRoutedPrimarySerial = serialNumber;
+            mRoutedPolicyAllowsFinish = false;
+            mRoutedSecondaryRequested = false;
+            mRoutedBiometric = false;
+            mKeyguardSecurityCallback.reportUnlockAttempt(userId, true, Duration.ZERO, false);
+            showNextSecurityScreenOrFinish(true, userId, false, getCurrentSecurityMode());
+        }
+        @Override
+        public void completeBiometricAuthentication(int userId, int serialNumber, boolean strong) {
+            if (!isReady(userId, serialNumber)) return;
+            mRoutedPrimaryUser = userId;
+            mRoutedPrimarySerial = serialNumber;
+            mRoutedPolicyAllowsFinish = false;
+            mRoutedSecondaryRequested = false;
+            mRoutedBiometric = true;
+            mRoutedStrongBiometric = strong;
+            mRoutedBiometricReported = false;
+            // The consumed native grant drives policy. Do not install provisional global
+            // biometric success or report a primary credential before admin/SIM acceptance.
+            showNextSecurityScreenOrFinish(false, userId, false, getCurrentSecurityMode());
+        }
+    };
+
+    @Inject
+    void setSecureSpaceEntryCoordinator(
+            com.android.systemui.securespaces.SecureSpaceEntryCoordinator coordinator) {
+        mSecureSpaceEntry = coordinator;
+    }
+
     private final Lazy<PrimaryBouncerInteractor> mPrimaryBouncerInteractor;
     private final Lazy<BouncerInteractor> mBouncerInteractor;
     private final Executor mBgExecutor;
@@ -542,7 +661,24 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
         mKeyguardStateController = keyguardStateController;
         mSecurityViewFlipperController = securityViewFlipperController;
         mAdminSecondaryLockScreenController = adminSecondaryLockScreenControllerFactory.create(
-                mKeyguardSecurityCallback);
+                new KeyguardSecurityCallback() {
+                    @Override
+                    public boolean dismiss(boolean authenticated, int targetId,
+                            boolean bypassSecondary, SecurityMode expectedMode) {
+                        if (mRoutedPrimaryUser == -1) {
+                            return mKeyguardSecurityCallback.dismiss(authenticated, targetId,
+                                    bypassSecondary, expectedMode);
+                        }
+                        if (!mRoutedSecondaryRequested || !authenticated
+                                || targetId != mRoutedPrimaryUser) return false;
+                        mCompletingRoutedSecondary = true;
+                        try {
+                            return showNextSecurityScreenOrFinish(true, targetId, true, expectedMode);
+                        } finally {
+                            mCompletingRoutedSecondary = false;
+                        }
+                    }
+                });
         mSecureLockDeviceInteractor = secureLockDeviceInteractor;
         mConfigurationController = configurationController;
         mLastOrientation = getResources().getConfiguration().orientation;
@@ -591,6 +727,7 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
         mView.setOnKeyListener(mOnKeyListener);
 
         showPrimarySecurityScreen(false);
+        if (mSecureSpaceEntry != null) mSecureSpaceEntry.registerHost(mSecureSpaceHost);
 
         if (SceneContainerFlag.isEnabled()) {
             // When the scene framework says that the lockscreen has been dismissed, dismiss the
@@ -639,6 +776,7 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
 
     @Override
     protected void onViewDetached() {
+        if (mSecureSpaceEntry != null) mSecureSpaceEntry.unregisterHost(mSecureSpaceHost);
         mUpdateMonitor.removeCallback(mKeyguardUpdateMonitorCallback);
         mConfigurationController.removeCallback(mConfigurationListener);
         mView.removeMotionEventListener(mGlobalTouchListener);
@@ -657,6 +795,12 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
 
     /**  */
     public void onPause() {
+        if (mSecureSpaceEntry != null) mSecureSpaceEntry.onSourcePaused();
+        mRoutedPrimaryUser = -1;
+        mRoutedPrimarySerial = -1;
+        mRoutedPolicyAllowsFinish = false;
+        mRoutedSecondaryRequested = false;
+        mRoutedBiometric = false;
         if (DEBUG) {
             Log.d(TAG, String.format("screen off, instance %s at %s",
                     Integer.toHexString(hashCode()), SystemClock.uptimeMillis()));
@@ -942,6 +1086,18 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
      */
     public boolean showNextSecurityScreenOrFinish(boolean authenticated, int targetUserId,
             boolean bypassSecondaryLockScreen, SecurityMode expectedSecurityMode) {
+        if (mSecureSpaceEntry != null && mSecureSpaceEntry.isErasurePending()) return false;
+        if (mSecureSpaceEntry != null && mSecureSpaceEntry.isAwaitingPolicy()
+                && mRoutedPrimaryUser == -1) return false;
+        if (mRoutedPrimaryUser != -1) {
+            if (bypassSecondaryLockScreen && !mCompletingRoutedSecondary
+                    && !mRoutedPolicyAllowsFinish) return false;
+            android.content.pm.UserInfo user = getContext().getSystemService(
+                    android.os.UserManager.class).getUserInfo(targetUserId);
+            if (targetUserId != mRoutedPrimaryUser
+                    || mSelectedUserInteractor.getSelectedUserId() != targetUserId
+                    || user == null || user.serialNumber != mRoutedPrimarySerial) return false;
+        }
         if (DEBUG) Log.d(TAG, "showNextSecurityScreenOrFinish(" + authenticated + ")");
         if (expectedSecurityMode != SecurityMode.Invalid
                 && expectedSecurityMode != getCurrentSecurityMode()) {
@@ -962,7 +1118,7 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
             finish = true;
             eventSubtype = BOUNCER_DISMISS_EXTENDED_ACCESS;
             uiEvent = BouncerUiEvent.BOUNCER_DISMISS_EXTENDED_ACCESS;
-        } else if (mUpdateMonitor.getUserUnlockedWithBiometric(targetUserId)) {
+        } else if (mRoutedBiometric || mUpdateMonitor.getUserUnlockedWithBiometric(targetUserId)) {
             finish = true;
             eventSubtype = BOUNCER_DISMISS_BIOMETRIC;
             uiEvent = BouncerUiEvent.BOUNCER_DISMISS_BIOMETRIC;
@@ -1039,6 +1195,10 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
             Intent secondaryLockscreenIntent =
                     mUpdateMonitor.getSecondaryLockscreenRequirement(targetUserId);
             if (secondaryLockscreenIntent != null) {
+                if (mRoutedPrimaryUser != -1) mRoutedSecondaryRequested = true;
+                if (mSecureSpaceEntry != null && SceneContainerFlag.isEnabled()) {
+                    mSecureSpaceEntry.setSecondaryPolicyVisible(true);
+                }
                 mAdminSecondaryLockScreenController.show(secondaryLockscreenIntent);
                 return false;
             }
@@ -1051,11 +1211,20 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
             mUiEventLogger.log(uiEvent, getSessionId());
         }
 
+        boolean completingRoutedPrimary = finish && mRoutedPrimaryUser != -1
+                && !mRoutedPolicyAllowsFinish;
+        if (completingRoutedPrimary) {
+            if (mSecureSpaceEntry == null || !mSecureSpaceEntry.publishPrimaryAuthentication(
+                    targetUserId, mRoutedPrimarySerial)) return false;
+            mRoutedPolicyAllowsFinish = true;
+            mSecureSpaceEntry.setSecondaryPolicyVisible(false);
+        }
+
         if (SceneContainerFlag.isEnabled()) {
-            if (authenticatedWithPrimaryAuth) {
+            if (authenticatedWithPrimaryAuth && !completingRoutedPrimary) {
                 mPrimaryBouncerInteractor.get()
                         .notifyKeyguardAuthenticatedPrimaryAuth(targetUserId);
-            } else if (finish) {
+            } else if (finish && !completingRoutedPrimary) {
                 mPrimaryBouncerInteractor.get().notifyUserRequestedBouncerWhenAlreadyAuthenticated(
                         targetUserId);
             }

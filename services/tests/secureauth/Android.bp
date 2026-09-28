@@ -1,0 +1,10 @@
+java_test_host {
+    name: "SecureAuthKeyErasureTests",
+    srcs: [
+        ":secure-auth-key-erasure-sources",
+        "SecureAuthKeyErasureTest.java",
+    ],
+    static_libs: ["junit"],
+    test_suites: ["general-tests"],
+    test_config: "AndroidTest.xml",
+}

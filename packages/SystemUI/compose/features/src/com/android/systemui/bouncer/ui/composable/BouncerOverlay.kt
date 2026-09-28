@@ -27,8 +27,13 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.overscroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.zIndex
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -105,6 +110,7 @@ private fun ContentScope.BouncerOverlay(
     modifier: Modifier = Modifier,
 ) {
     val backgroundColor = viewModel.backgroundColor
+    val secondaryPolicyVisible by viewModel.secondaryPolicyVisible.collectAsState()
 
     DisposableEffect(Unit) { onDispose { viewModel.onUiDestroyed() } }
     val containerLayout = calculateContainerLayout()
@@ -148,6 +154,15 @@ private fun ContentScope.BouncerOverlay(
                     .fillMaxSize()
                     // No-op if containerization is enabled as insets will be already consumed.
                     .windowInsetsPadding(insets),
+            )
+            // The native DPC SurfaceView needs a visible parent in the Scene bouncer window.
+            AndroidView(
+                factory = { context ->
+                    ConstraintLayout(context).also { viewModel.registerSecondaryPolicyHost(it) }
+                },
+                modifier = Modifier.fillMaxSize().zIndex(if (secondaryPolicyVisible) 1f else -1f),
+                onRelease = { viewModel.unregisterSecondaryPolicyHost(it) },
+                update = { viewModel.registerSecondaryPolicyHost(it) },
             )
         }
     }

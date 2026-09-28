@@ -125,7 +125,16 @@ constructor(
 
     private val callbacks = CopyOnWriteArrayList<UserCallback>()
     private val userInfos: Flow<List<UserInfo>> =
-        repository.userInfos.map { userInfos -> userInfos.filter { it.isFull } }
+        combine(repository.userInfos, repository.selectedUserInfo) { userInfos, selectedUser ->
+            // Presentation only: authentication and erasure retain the complete native registry.
+            if (selectedUser.userType == UserManager.USER_TYPE_FULL_SECURE_SPACE) {
+                emptyList()
+            } else {
+                userInfos.filter {
+                    it.isFull && it.userType != UserManager.USER_TYPE_FULL_SECURE_SPACE
+                }
+            }
+        }
 
     /** List of current on-device users to select from. */
     val users: Flow<List<UserModel>>
@@ -134,6 +143,10 @@ constructor(
                 userInfos,
                 selectedUserInfo,
                 settings ->
+                // selectedUserInfo can arrive before the filtered list after a switch.
+                if (selectedUserInfo.userType == UserManager.USER_TYPE_FULL_SECURE_SPACE) {
+                    return@combine emptyList()
+                }
                 toUserModels(
                     userInfos = userInfos,
                     selectedUserId = selectedUserInfo.id,
@@ -141,11 +154,25 @@ constructor(
                 )
             }
 
-    /** The currently-selected user. */
+    /** Public presentation of the selected user; private identity stays in UserRepository. */
     val selectedUser: Flow<UserModel>
         get() =
             repository.selectedUserInfo.map { selectedUserInfo ->
                 val selectedUserId = selectedUserInfo.id
+                if (selectedUserInfo.userType == UserManager.USER_TYPE_FULL_SECURE_SPACE) {
+                    // Hidden controls can still retain data or expose accessibility metadata.
+                    // Never load a private user's name or avatar for a public UI model.
+                    return@map UserModel(
+                        id = selectedUserId,
+                        name = Text.Loaded(""),
+                        image = checkNotNull(applicationContext.getDrawable(
+                            com.android.settingslib.R.drawable.ic_account_circle
+                        )),
+                        isSelected = true,
+                        isSelectable = false,
+                        isGuest = false,
+                    )
+                }
                 toUserModel(
                     userInfo = selectedUserInfo,
                     selectedUserId = selectedUserId,
@@ -161,8 +188,11 @@ constructor(
                     userInfos,
                     repository.userSwitcherSettings,
                     keyguardInteractor.isKeyguardShowing,
-                ) { _, userInfos, settings, isDeviceLocked ->
+                ) { selectedUser, userInfos, settings, isDeviceLocked ->
                     buildList {
+                        if (selectedUser.userType == UserManager.USER_TYPE_FULL_SECURE_SPACE) {
+                            return@buildList
+                        }
                         val canAccessUserSwitcher =
                             !isDeviceLocked || settings.isAddUsersFromLockscreen
                         if (canAccessUserSwitcher) {
@@ -245,6 +275,9 @@ constructor(
                 selectedUserInfo,
                 actionModels,
                 settings ->
+                if (selectedUserInfo.userType == UserManager.USER_TYPE_FULL_SECURE_SPACE) {
+                    return@combine ArrayList<UserRecord>()
+                }
                 ArrayList(
                     userInfos.map {
                         toRecord(userInfo = it, selectedUserId = selectedUserInfo.id)
@@ -271,7 +304,11 @@ constructor(
     val selectedUserRecord: StateFlow<UserRecord?> =
         repository.selectedUserInfo
             .map { selectedUserInfo ->
-                toRecord(userInfo = selectedUserInfo, selectedUserId = selectedUserInfo.id)
+                if (selectedUserInfo.userType == UserManager.USER_TYPE_FULL_SECURE_SPACE) {
+                    null
+                } else {
+                    toRecord(userInfo = selectedUserInfo, selectedUserId = selectedUserInfo.id)
+                }
             }
             .stateIn(
                 scope = applicationScope,
@@ -299,7 +336,9 @@ constructor(
         get() = repository.isSimpleUserSwitcher()
 
     val isUserSwitcherEnabled: Boolean
-        get() = repository.isUserSwitcherEnabled()
+        get() =
+            repository.getSelectedUserInfo().userType != UserManager.USER_TYPE_FULL_SECURE_SPACE &&
+                repository.isUserSwitcherEnabled()
 
     val keyguardUpdateMonitorCallback =
         object : KeyguardUpdateMonitorCallback() {
@@ -529,6 +568,9 @@ constructor(
      * shade context will be used.
      */
     fun showUserSwitcher(expandable: Expandable?, context: Context? = null) {
+        if (repository.getSelectedUserInfo().userType == UserManager.USER_TYPE_FULL_SECURE_SPACE) {
+            return
+        }
         if (featureFlags.isEnabled(Flags.FULL_SCREEN_USER_SWITCHER)) {
             showDialog(ShowDialogRequestModel.ShowUserSwitcherFullscreenDialog(expandable, context))
         } else {

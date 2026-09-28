@@ -18,6 +18,8 @@ package com.android.server.biometrics.sensors.fingerprint.hidl;
 
 import android.annotation.NonNull;
 import android.content.Context;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
+
 import android.hardware.biometrics.fingerprint.ISession;
 import android.os.Build;
 import android.os.Environment;
@@ -83,11 +85,13 @@ public class FingerprintUpdateActiveUserClient extends StartUserClient<ISession,
             Slog.e(TAG, "First SDK version " + firstSdkInt + " is invalid; must be " +
                     "at least VERSION_CODES.BASE");
         }
+        int hardwareUserId = SecureSpaceFingerprintPool.hardwareUserId(
+                getContext(), getTargetUserId());
         File baseDir;
         if (firstSdkInt <= Build.VERSION_CODES.O_MR1) {
-            baseDir = Environment.getUserSystemDirectory(getTargetUserId());
+            baseDir = Environment.getUserSystemDirectory(hardwareUserId);
         } else {
-            baseDir = Environment.getDataVendorDeDirectory(getTargetUserId());
+            baseDir = Environment.getDataVendorDeDirectory(hardwareUserId);
         }
 
         mDirectory = new File(baseDir, FP_DATA_DIR);
@@ -126,9 +130,13 @@ public class FingerprintUpdateActiveUserClient extends StartUserClient<ISession,
                 mCallback.onClientFinished(this, false /* success */);
                 return;
             }
-            sessionAdapter.setActiveGroup(targetId, mDirectory.getAbsolutePath());
-            mAuthenticatorIds.put(targetId, mHasEnrolledBiometrics
-                    ? sessionAdapter.getAuthenticatorIdForUpdateClient() : 0L);
+            sessionAdapter.setActiveGroup(SecureSpaceFingerprintPool.hardwareUserId(
+                    getContext(), targetId), mDirectory.getAbsolutePath());
+            boolean shared = SecureSpaceFingerprintPool.isSharedUser(getContext(), targetId);
+            long id = (shared || mHasEnrolledBiometrics)
+                    ? sessionAdapter.getAuthenticatorIdForUpdateClient() : 0L;
+            SecureSpaceFingerprintPool.updateAuthenticatorIds(getContext(), getSensorId(),
+                    targetId, id, mAuthenticatorIds);
             mUserStartedCallback.onUserStarted(targetId, null, 0);
             mCallback.onClientFinished(this, true /* success */);
         } catch (RemoteException e) {

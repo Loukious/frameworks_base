@@ -67,6 +67,12 @@ class BiometricTestSessionImpl extends ITestSession.Stub {
      */
     private final IFingerprintServiceReceiver mReceiver = new IFingerprintServiceReceiver.Stub() {
         @Override
+        public void onSecureSpaceAuthenticationSucceeded(android.os.IBinder token, int originUserId,
+                int originSerial, int destinationUserId, int destinationSerial, boolean strong) {
+            // Enrollment-only test receivers cannot route device entry.
+        }
+
+        @Override
         public void onEnrollResult(Fingerprint fp, int remaining) {
 
         }

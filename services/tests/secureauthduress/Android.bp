@@ -1,0 +1,11 @@
+java_test_host {
+    name: "SecureAuthDuressCodecTests",
+    srcs: [
+        ":secure-auth-duress-codec-sources",
+        "SecureAuthDuressCodecTest.java",
+        "SecureAuthDuressReservationTest.java",
+    ],
+    static_libs: ["junit"],
+    test_suites: ["general-tests"],
+    test_config: "AndroidTest.xml",
+}

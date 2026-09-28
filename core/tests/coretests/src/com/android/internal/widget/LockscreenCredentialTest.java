@@ -38,6 +38,62 @@ import java.util.Random;
 public class LockscreenCredentialTest {
 
     @Test
+    public void secureSpaceVerificationCopiesPinAsPasswordAndZeroizesIndependently() {
+        try (LockscreenCredential source = LockscreenCredential.createPin("3456")) {
+            byte[] copiedBytes;
+            try (LockscreenCredential copy = source.duplicateForSecureSpaceVerification(
+                    LockPatternUtils.CREDENTIAL_TYPE_PASSWORD)) {
+                assertTrue(copy.isPassword());
+                assertArrayEquals(source.getCredential(), copy.getCredential());
+                copiedBytes = copy.getCredential();
+            }
+            assertArrayEquals(new byte[4], copiedBytes);
+            assertArrayEquals("3456".getBytes(), source.getCredential());
+        }
+    }
+
+    @Test
+    public void secureSpaceVerificationCopiesPasswordAsPinWithoutSoftwareComparison() {
+        try (LockscreenCredential source = LockscreenCredential.createPassword("a345")) {
+            try (LockscreenCredential copy = source.duplicateForSecureSpaceVerification(
+                    LockPatternUtils.CREDENTIAL_TYPE_PIN)) {
+                assertTrue(copy.isPin());
+                // Even a wrong input is sent through the native verifier's retry accounting.
+                assertArrayEquals(source.getCredential(), copy.getCredential());
+            }
+        }
+    }
+
+    @Test
+    public void secureSpaceVerificationPreservesLegacyTypeAndCharacterInformation() {
+        try (LockscreenCredential source = LockscreenCredential.createPassword("\u2122abc")) {
+            try (LockscreenCredential copy = source.duplicateForSecureSpaceVerification(
+                    LockPatternUtils.CREDENTIAL_TYPE_PASSWORD_OR_PIN)) {
+                assertTrue(copy.isPassword());
+                assertTrue(copy.hasInvalidChars());
+                assertArrayEquals(source.getCredential(), copy.getCredential());
+            }
+        }
+    }
+
+    @Test
+    public void secureSpaceVerificationRejectsNonTextAndUnifiedProfileSecrets() {
+        try (LockscreenCredential source = LockscreenCredential.createNone()) {
+            assertEquals(null, source.duplicateForSecureSpaceVerification(
+                    LockPatternUtils.CREDENTIAL_TYPE_PIN));
+        }
+        try (LockscreenCredential source = LockscreenCredential.createPin("3456")) {
+            assertEquals(null, source.duplicateForSecureSpaceVerification(
+                    LockPatternUtils.CREDENTIAL_TYPE_PATTERN));
+        }
+        try (LockscreenCredential source =
+                LockscreenCredential.createUnifiedProfilePassword(new byte[32])) {
+            assertEquals(null, source.duplicateForSecureSpaceVerification(
+                    LockPatternUtils.CREDENTIAL_TYPE_PASSWORD));
+        }
+    }
+
+    @Test
     public void testNoneCredential() {
         LockscreenCredential none = LockscreenCredential.createNone();
 

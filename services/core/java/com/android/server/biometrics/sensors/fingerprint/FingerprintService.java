@@ -264,6 +264,30 @@ public class FingerprintService extends SystemService {
         }
 
         @SuppressWarnings("deprecation")
+        @Override
+        public boolean hasSecureSpaceRoutingCandidate(String packageName) {
+            mAppOps.checkPackage(Binder.getCallingUid(), packageName);
+            if (!Utils.isKeyguard(getContext(), packageName)) {
+                throw new SecurityException("Fingerprint routing availability is keyguard-only");
+            }
+            final long identity = Binder.clearCallingIdentity();
+            try {
+                return hasSecureSpaceRoutingCandidateInternal();
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        }
+
+        private boolean hasSecureSpaceRoutingCandidateInternal() {
+            if (!SecureSpaceFingerprintPool.hasConcealedUsers(getContext())) return false;
+            for (var sensor : mRegistry.getAllProperties()) {
+                if (SecureSpaceFingerprintPool.hasRoutingCandidate(getContext(), sensor.sensorId)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         @Override // Binder call
         public long authenticate(
                 final IBinder token,
@@ -276,6 +300,14 @@ public class FingerprintService extends SystemService {
             final String opPackageName = options.getOpPackageName();
             final String attributionTag = options.getAttributionTag();
             final int userId = options.getUserId();
+            final boolean isKeyguard = Utils.isKeyguard(getContext(), opPackageName);
+            if (callingUid != Process.SYSTEM_UID && !isKeyguard) {
+                android.os.UserManager users = getContext().getSystemService(android.os.UserManager.class);
+                if (users.getCredentialOwnerProfile(callingUserId)
+                        != users.getCredentialOwnerProfile(userId)) {
+                    throw new SecurityException("App fingerprint authentication is scoped to its credential owner");
+                }
+            }
 
             if (!canUseFingerprint(
                     opPackageName,
@@ -290,12 +322,11 @@ public class FingerprintService extends SystemService {
 
             // Keyguard check must be done on the caller's binder identity, since it also checks
             // permission.
-            final boolean isKeyguard = Utils.isKeyguard(getContext(), opPackageName);
-
             // Clear calling identity when checking LockPatternUtils for StrongAuth flags.
             final long identity1 = Binder.clearCallingIdentity();
             try {
-                if (isKeyguard && Utils.isUserEncryptedOrLockdown(mLockPatternUtils, userId)) {
+                if (isKeyguard && Utils.isUserEncryptedOrLockdown(mLockPatternUtils, userId)
+                        && !hasSecureSpaceRoutingCandidateInternal()) {
                     // If this happens, something in KeyguardUpdateMonitor is wrong.
                     // SafetyNet for b/79776455
                     EventLog.writeEvent(0x534e4554, "79776455");
@@ -1170,6 +1201,9 @@ public class FingerprintService extends SystemService {
             int uid,
             int pid,
             int userId) {
+        if (uid != Process.SYSTEM_UID) {
+            mAppOps.checkPackage(uid, opPackageName);
+        }
         if (getContext().checkCallingPermission(USE_FINGERPRINT)
                 != PackageManager.PERMISSION_GRANTED) {
             Utils.checkPermission(getContext(), USE_BIOMETRIC);

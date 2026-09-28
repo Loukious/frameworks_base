@@ -1006,6 +1006,16 @@ public class BiometricService extends SystemService {
                 IBiometricServiceReceiver receiver, String opPackageName, PromptInfo promptInfo) {
 
             super.authenticate_enforcePermission();
+            int caller = android.os.Binder.getCallingUid();
+            if (caller != android.os.Process.SYSTEM_UID
+                    && !Utils.isKeyguard(getContext(), opPackageName)) {
+                android.os.UserManager users = getContext().getSystemService(android.os.UserManager.class);
+                if (users.getCredentialOwnerProfile(android.os.UserHandle.getUserId(caller))
+                        != users.getCredentialOwnerProfile(userId)) {
+                    throw new SecurityException("App biometric authentication is scoped to its credential owner");
+                }
+            }
+
 
             if (token == null || receiver == null || opPackageName == null || promptInfo == null) {
                 Slog.e(TAG, "Unable to authenticate, one or more null arguments");

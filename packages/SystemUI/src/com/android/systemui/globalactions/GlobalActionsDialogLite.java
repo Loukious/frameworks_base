@@ -904,7 +904,9 @@ public class GlobalActionsDialogLite implements DialogInterface.OnDismissListene
                     }
                     break;
                 case USERS:
-                    if (mUserManager.getUsers().size() > 1) {
+                    if (mUserManager.isUserSwitcherEnabled()
+                            && mUserManager.getUsers().stream()
+                                    .filter(UserInfo::isUiSwitchableHumanUser).count() > 1) {
                         addUserActions(mUsersItems, currentUserInfo);
                         addIfShouldShowAction(tempActions, new UsersAction());
                     }

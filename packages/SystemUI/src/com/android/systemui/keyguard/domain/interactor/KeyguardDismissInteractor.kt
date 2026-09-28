@@ -29,9 +29,14 @@ import com.android.systemui.keyguard.shared.model.KeyguardDone
 import com.android.systemui.power.domain.interactor.PowerInteractor
 import com.android.systemui.user.domain.interactor.SelectedUserInteractor
 import com.android.systemui.util.kotlin.sample
+import com.android.systemui.securespaces.SecureSpaceEntryCoordinator
+import com.android.systemui.securespaces.primaryAuthenticationProofs
+import kotlinx.coroutines.flow.MutableStateFlow
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
@@ -52,6 +57,13 @@ constructor(
     trustRepository: TrustRepository,
     powerInteractor: PowerInteractor,
 ) {
+    private val secureSpaceEntry = MutableStateFlow<SecureSpaceEntryCoordinator?>(null)
+
+    @Inject
+    fun setSecureSpaceEntryCoordinator(coordinator: SecureSpaceEntryCoordinator) {
+        secureSpaceEntry.value = coordinator
+    }
+
     /*
      * Updates when a biometric has authenticated the device and is requesting to dismiss
      * the keyguard. When true, a class 3 biometrics has authenticated. Else, a lower class
@@ -83,7 +95,11 @@ constructor(
     private val primaryAuthenticated: Flow<Unit> =
         primaryBouncerInteractor.keyguardAuthenticatedPrimaryAuth
             .filter { authedUserId -> authedUserId == selectedUserInteractor.getSelectedUserId() }
-            .map {} // map to Unit
+            .map {}
+
+    private val routedPrimaryProofs = secureSpaceEntry.flatMapLatest { coordinator ->
+        coordinator?.primaryAuthenticationProofs() ?: emptyFlow()
+    }
 
     /*
      * Updates when the current user requests the bouncer after they've already successfully
@@ -99,14 +115,20 @@ constructor(
     val keyguardDone: Flow<KeyguardDone> = keyguardRepository.keyguardDone
 
     /** Updates when any request to dismiss the current user's keyguard has arrived. */
-    private val dismissKeyguardRequest: Flow<DismissAction> =
-        merge(
+    private val dismissKeyguardRequest:
+        Flow<Pair<DismissAction, SecureSpaceEntryCoordinator.Proof?>> = merge(
+            merge(
                 biometricAuthenticatedRequestDismissKeyguard,
                 onTrustGrantedRequestDismissKeyguard,
                 primaryAuthenticated,
                 userRequestedBouncerWhenAlreadyAuthenticated,
-            )
-            .sample(keyguardRepository.dismissAction)
+            ).map { null as SecureSpaceEntryCoordinator.Proof? },
+            routedPrimaryProofs,
+        ).sample(keyguardRepository.dismissAction) { proof, action -> action to proof }
+
+    private fun isRequestCurrent(request: Pair<DismissAction, SecureSpaceEntryCoordinator.Proof?>):
+        Boolean = secureSpaceEntry.value?.isAwaitingPolicy != true &&
+            (request.second?.let { secureSpaceEntry.value?.isProofCurrent(it) == true } ?: true)
 
     /**
      * Updates when a request to dismiss the current user's keyguard has arrived and there's a
@@ -114,7 +136,7 @@ constructor(
      * with or without a deferral.
      */
     val dismissKeyguardRequestWithImmediateDismissAction: Flow<Unit> =
-        dismissKeyguardRequest.filter { it is DismissAction.RunImmediately }.map {} // map to Unit
+        dismissKeyguardRequest.filter { isRequestCurrent(it) && it.first is DismissAction.RunImmediately }.map {} // map to Unit
 
     /**
      * Updates when a request to dismiss the current user's keyguard has arrived and there's isn't a
@@ -122,7 +144,7 @@ constructor(
      * keyguard transitions to GONE.
      */
     val dismissKeyguardRequestWithoutImmediateDismissAction: Flow<Unit> =
-        dismissKeyguardRequest.filter { it !is DismissAction.RunImmediately }.map {} // map to Unit
+        dismissKeyguardRequest.filter { isRequestCurrent(it) && it.first !is DismissAction.RunImmediately }.map {} // map to Unit
 
     suspend fun setKeyguardDone(keyguardDoneTiming: KeyguardDone) {
         keyguardRepository.setKeyguardDone(keyguardDoneTiming)

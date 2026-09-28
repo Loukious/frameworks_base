@@ -45,6 +45,11 @@ import android.hardware.fingerprint.FingerprintManager;
 import android.hardware.fingerprint.FingerprintSensorPropertiesInternal;
 import android.hardware.fingerprint.IUdfpsOverlayController;
 import android.os.IBinder;
+import android.os.PowerManager;
+import android.os.SystemClock;
+import com.android.server.LocalServices;
+import com.android.server.locksettings.LockSettingsInternal;
+import com.android.server.biometrics.sensors.fingerprint.SecureSpaceFingerprintPool;
 import android.os.RemoteException;
 import android.util.Slog;
 
@@ -90,6 +95,22 @@ public class FingerprintAuthenticationClient
     @Nullable
     private ICancellationSignal mCancellationSignal;
     private boolean mIsPointerDown;
+    private LockSettingsInternal.SecureSpaceFingerprintOrigin mSecureSpaceOrigin;
+    private boolean mSecureSpaceTouchActive;
+
+    private void captureSecureSpaceTouchOrigin() {
+        if (!isConcealedKeyguardAuthentication() || mSecureSpaceTouchActive) return;
+        mSecureSpaceTouchActive = true;
+        var locks = LocalServices.getService(LockSettingsInternal.class);
+        mSecureSpaceOrigin = locks == null ? null
+                : locks.captureSecureSpaceFingerprintOrigin(getTargetUserId());
+    }
+
+    private boolean isConcealedKeyguardAuthentication() {
+        return isKeyguard() && !isBiometricPrompt() && getOperationId() == 0
+                && SecureSpaceFingerprintPool.isSharedUser(getContext(), getTargetUserId())
+                && SecureSpaceFingerprintPool.hasConcealedUsers(getContext());
+    }
 
     public FingerprintAuthenticationClient(
             @NonNull Context context,
@@ -141,6 +162,11 @@ public class FingerprintAuthenticationClient
 
     @Override
     public void start(@NonNull ClientMonitorCallback callback) {
+        if (isConcealedKeyguardAuthentication()) {
+            var locks = LocalServices.getService(LockSettingsInternal.class);
+            mSecureSpaceOrigin = locks == null ? null
+                    : locks.captureSecureSpaceFingerprintOrigin(getTargetUserId());
+        }
         super.start(callback);
 
         if (mSensorProps.isAnyUdfpsType()) {
@@ -176,6 +202,71 @@ public class FingerprintAuthenticationClient
             BiometricAuthenticator.Identifier identifier,
             boolean authenticated,
             ArrayList<Byte> token) {
+        if (authenticated && SecureSpaceFingerprintPool.isSharedUser(
+                getContext(), getTargetUserId())) {
+            boolean rejectedSuccessfulMatch = false;
+            byte[] original = null;
+            if (token != null) {
+                original = new byte[token.size()];
+                for (int i = 0; i < token.size(); i++) original[i] = token.get(i);
+            }
+            boolean concealed = isConcealedKeyguardAuthentication();
+            // Ordinary keyguard without spaces keeps the existing native credential policy.
+            boolean needsOwnership = concealed
+                    || SecureSpaceFingerprintPool.hasConcealedUsers(getContext());
+            var destination = needsOwnership && identifier != null
+                    ? SecureSpaceFingerprintPool.resolve(getContext(), getSensorId(),
+                            identifier.getBiometricId(), original, getTargetUserId(), concealed)
+                    : null;
+            if (needsOwnership && destination == null) {
+                Slog.w(TAG, "Secure Space fingerprint ownership rejected");
+                authenticated = false;
+                token = null;
+                rejectedSuccessfulMatch = true;
+            } else if (concealed) {
+                var locks = LocalServices.getService(LockSettingsInternal.class);
+                var power = getContext().getSystemService(PowerManager.class);
+                if (!power.isInteractive()) {
+                    power.wakeUp(SystemClock.uptimeMillis(), PowerManager.WAKE_REASON_BIOMETRIC,
+                            "android:SECURE_SPACE_FINGERPRINT");
+                }
+                IBinder handoff = locks == null || mSecureSpaceOrigin == null ? null
+                        : locks.issueSecureSpaceFingerprintHandoff(destination,
+                                mSecureSpaceOrigin, getToken());
+                if (handoff == null) {
+                    Slog.w(TAG, "Secure Space fingerprint handoff rejected: origin="
+                            + (mSecureSpaceOrigin != null));
+                    authenticated = false;
+                    token = null;
+                    rejectedSuccessfulMatch = true;
+                } else {
+                    recordSecureSpaceKeyguardSuccess(original, destination.userId());
+                    try {
+                        getListener().onSecureSpaceAuthenticationSucceeded(handoff,
+                                mSecureSpaceOrigin.userId(), mSecureSpaceOrigin.serialNumber(),
+                                destination.userId(), destination.serialNumber(), mIsStrongBiometric);
+                    } catch (RemoteException | RuntimeException error) {
+                        // Binder death or missing receiver cannot dismiss keyguard; native TTL
+                        // and witness attachment keep this opaque capability from being reused.
+                        Slog.w(TAG, "Secure fingerprint handoff delivery failed");
+                    }
+                    mState = STATE_STOPPED;
+                    mSensorOverlays.hide(getSensorId());
+                    mAuthenticationStateListeners.onAuthenticationStopped(
+                            new AuthenticationStoppedInfo.Builder(BiometricSourceType.FINGERPRINT,
+                                    getRequestReason()).build());
+                    mCallback.onClientFinished(this, true);
+                    return;
+                }
+            }
+            if (rejectedSuccessfulMatch) {
+                // Goodix ends its authenticate operation after reporting a matched template.
+                // Treat a policy rejection as terminal too, so keyguard can start a fresh
+                // operation instead of leaving an idle HAL behind a running client.
+                onError(BiometricFingerprintConstants.FINGERPRINT_ERROR_CANCELED, 0);
+                return;
+            }
+        }
         super.onAuthenticated(identifier, authenticated, token);
         handleLockout(authenticated);
         if (authenticated) {
@@ -231,6 +322,14 @@ public class FingerprintAuthenticationClient
 
     @Override
     public void onAcquired(@FingerprintAcquired int acquiredInfo, int vendorCode) {
+        if (mSensorProps.halHandlesDisplayTouches
+                && acquiredInfo == FINGERPRINT_ACQUIRED_VENDOR) {
+            // The onyx Goodix HAL reports touch down/up as vendor acquired 22/23.
+            // A keyguard request can begin before a delayed SCREEN_OFF broadcast;
+            // bind the native proof to the touch session, not that idle request.
+            if (vendorCode == 22) captureSecureSpaceTouchOrigin();
+            if (vendorCode == 23) mSecureSpaceTouchActive = false;
+        }
         mAuthenticationStateListeners.onAuthenticationAcquired(
                 new AuthenticationAcquiredInfo.Builder(BiometricSourceType.FINGERPRINT,
                         getRequestReason(), acquiredInfo).build()
@@ -362,6 +461,7 @@ public class FingerprintAuthenticationClient
     @Override
     public void onPointerDown(PointerContext pc) {
         try {
+            captureSecureSpaceTouchOrigin();
             mIsPointerDown = true;
             mState = STATE_STARTED;
 
@@ -382,6 +482,7 @@ public class FingerprintAuthenticationClient
     @Override
     public void onPointerUp(PointerContext pc) {
         try {
+            mSecureSpaceTouchActive = false;
             mIsPointerDown = false;
             mState = STATE_STARTED_PAUSED_ATTEMPTED;
 
