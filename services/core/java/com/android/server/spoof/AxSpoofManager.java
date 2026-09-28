@@ -113,7 +113,11 @@ public class AxSpoofManager implements IAxSpoofManager {
             "manufacturer", "brand", "model", "device", "name",
     };
 
+    // Keybox and fingerprint work get their own executor: the fingerprint crawl
+    // is many sequential requests, and a stuck one (cancel() can't interrupt
+    // blocking URLConnection IO) must not hold up the keybox fetch behind it.
     private final ExecutorService mNetworkExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService mFingerprintExecutor = Executors.newSingleThreadExecutor();
     private BroadcastReceiver mPackageAddedReceiver;
     private int mBootstrapRetries;
     private final Runnable mRefreshAfterClear = this::refreshNow;
@@ -336,15 +340,17 @@ public class AxSpoofManager implements IAxSpoofManager {
 
     /** One fingerprint + keybox pass, without touching the hourly schedule. */
     private void refreshNow() {
-        try {
-            refreshPixelFingerprintIfStale();
-        } catch (Exception e) {
-            Log.e(TAG, "Fingerprint refresh failed", e);
-        }
+        // Keybox first: it is one small request, while the fingerprint crawl is
+        // the slow one and shouldn't be able to starve it.
         try {
             refreshKeyboxIfStale();
         } catch (Exception e) {
             Log.e(TAG, "Keybox refresh failed", e);
+        }
+        try {
+            refreshPixelFingerprintIfStale();
+        } catch (Exception e) {
+            Log.e(TAG, "Fingerprint refresh failed", e);
         }
     }
 
@@ -354,8 +360,8 @@ public class AxSpoofManager implements IAxSpoofManager {
      * can't wedge the shared HandlerThread that drives PACKAGE_ADDED handling
      * and the hourly reschedule.
      */
-    private <T> T runBounded(Callable<T> task) throws Exception {
-        Future<T> future = mNetworkExecutor.submit(task);
+    private <T> T runBounded(ExecutorService pool, Callable<T> task) throws Exception {
+        Future<T> future = pool.submit(task);
         try {
             return future.get(REFRESH_STEP_DEADLINE_MS, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
@@ -390,7 +396,7 @@ public class AxSpoofManager implements IAxSpoofManager {
                 : PixelDeviceRepository.getDaysUntilExpiry(canaryMonth, releaseDate);
         if (daysLeft != null && daysLeft > REFETCH_WINDOW_DAYS) return;
 
-        PixelDeviceRepository.PixelProfile matched = runBounded(() -> {
+        PixelDeviceRepository.PixelProfile matched = runBounded(mFingerprintExecutor, () -> {
             List<PixelDeviceRepository.PixelProfile> profiles =
                     PixelDeviceRepository.getProfiles(mContext, true);
             String defaultCodename = PixelDeviceRepository.getDefaultPhoneCodename(profiles);
@@ -400,7 +406,15 @@ public class AxSpoofManager implements IAxSpoofManager {
             return;
         }
 
-        JSONObject toSave = new JSONObject();
+        // Start from the saved config so flags set elsewhere (spoofVendingFinger,
+        // spoofProps, ...) survive the refresh; PlayIntegritySpoofService falls back
+        // to weak defaults for any it doesn't find. Drop what is derived from, or
+        // describes, the old fingerprint so it can't disagree with the new one.
+        JSONObject toSave = new JSONObject(existing.toString());
+        for (String stale : new String[] {"ID", "INCREMENTAL", "TYPE", "TAGS", "RELEASE",
+                "_canary_month", "_canary_release_date"}) {
+            toSave.remove(stale);
+        }
         toSave.put("MANUFACTURER", capitalize(matched.brand));
         toSave.put("BRAND", matched.brand);
         toSave.put("MODEL", matched.model);
@@ -456,7 +470,7 @@ public class AxSpoofManager implements IAxSpoofManager {
             return; // user manages their own keybox — never overwrite it
         }
 
-        String xml = runBounded(() -> {
+        String xml = runBounded(mNetworkExecutor, () -> {
             HttpURLConnection conn = (HttpURLConnection) new URL(OFFICIAL_KEYBOX_URL).openConnection();
             conn.setConnectTimeout(10_000);
             conn.setReadTimeout(10_000);
