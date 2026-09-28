@@ -17,6 +17,8 @@
 package com.android.server.spoof;
 
 import android.app.ActivityManager;
+import android.app.ActivityTaskManager;
+import android.app.TaskStackListener;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -28,6 +30,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.UserHandle;
 import android.provider.Settings;
+import android.security.pif.PlayIntegritySpoofService;
 import android.security.trickystore.TrickyStoreService;
 import android.util.Base64;
 import android.util.Log;
@@ -75,6 +78,11 @@ public class AxSpoofManager implements IAxSpoofManager {
     // rest of a multi-key reset a moment to land, then refresh straight away
     // rather than leaving the device without a fingerprint until the next tick.
     private static final long REFRESH_AFTER_CLEAR_DELAY_MS = TimeUnit.SECONDS.toMillis(5);
+    // Spoofing stays off until the user opens Settings for the first time after
+    // setup. The flag is persisted, so later boots start spoofing straight away;
+    // a clean flash wipes /data and the flag with it.
+    private static final String ACTIVATED_KEY = "spoof_activated";
+    private static final String SETTINGS_PACKAGE = "com.android.settings";
 
     private static final String PIF_ENABLED_KEY = "spoof_pif_enabled";
     private static final String TRICKYSTORE_ENABLED_KEY = "spoof_trickystore_enabled";
@@ -120,6 +128,11 @@ public class AxSpoofManager implements IAxSpoofManager {
     private final ExecutorService mFingerprintExecutor = Executors.newSingleThreadExecutor();
     private BroadcastReceiver mPackageAddedReceiver;
     private int mBootstrapRetries;
+    // Nothing spoof-related runs until the user first opens Settings (after setup):
+    // the config getters below return null, the refresh never starts and GMS is
+    // left alone. Set once by enableSpoofing() and persisted in ACTIVATED_KEY.
+    private volatile boolean mActivated;
+    private TaskStackListener mTaskListener;
     private final Runnable mRefreshAfterClear = this::refreshNow;
 
     private final Map<String, String> mCache = new ConcurrentHashMap<>();
@@ -168,7 +181,14 @@ public class AxSpoofManager implements IAxSpoofManager {
                     Settings.Secure.getUriFor(key), false, mObserver, UserHandle.USER_ALL);
         }
 
-        seedDefaultTargetsIfUnset();
+        mActivated = Settings.Secure.getIntForUser(
+                mResolver, ACTIVATED_KEY, 0, UserHandle.USER_SYSTEM) != 0;
+        if (mActivated) {
+            seedDefaultTargetsIfUnset();
+        } else {
+            Log.i(TAG, "Spoofing off until Settings is opened for the first time");
+            registerSettingsWatcher();
+        }
 
         mPackageAddedReceiver = new BroadcastReceiver() {
             @Override
@@ -187,11 +207,71 @@ public class AxSpoofManager implements IAxSpoofManager {
         filter.addDataScheme("package");
         mContext.registerReceiverAsUser(mPackageAddedReceiver, UserHandle.ALL, filter, null, mHandler);
 
-        mHandler.postDelayed(this::performScheduledRefresh,
-                isBootstrapPending() ? BOOTSTRAP_INITIAL_DELAY_MS : REFRESH_INTERVAL_MS);
+        if (mActivated) scheduleFirstRefresh();
 
         mReady = true;
         Log.i(TAG, "AxSpoofManager ready");
+    }
+
+    private void scheduleFirstRefresh() {
+        mHandler.postDelayed(this::performScheduledRefresh,
+                isBootstrapPending() ? BOOTSTRAP_INITIAL_DELAY_MS : REFRESH_INTERVAL_MS);
+    }
+
+    /**
+     * Watches for the first time the user brings Settings to the front. Only
+     * counts once setup is finished: Setup Wizard opens Settings screens (lock
+     * screen, fingerprint) and must not trigger the GMS restart.
+     */
+    private void registerSettingsWatcher() {
+        mTaskListener = new TaskStackListener() {
+            @Override
+            public void onTaskMovedToFront(ActivityManager.RunningTaskInfo taskInfo) {
+                if (mActivated || taskInfo == null) return;
+                final String pkg = taskInfo.topActivity != null
+                        ? taskInfo.topActivity.getPackageName()
+                        : (taskInfo.baseActivity != null
+                                ? taskInfo.baseActivity.getPackageName() : null);
+                if (!SETTINGS_PACKAGE.equals(pkg)) return;
+                mHandler.post(() -> {
+                    if (!mActivated && isDeviceProvisioned()) enableSpoofing();
+                });
+            }
+        };
+        try {
+            ActivityTaskManager.getService().registerTaskStackListener(mTaskListener);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to watch for Settings launch, spoofing stays off", e);
+            mTaskListener = null;
+        }
+    }
+
+    private void unregisterSettingsWatcher() {
+        if (mTaskListener == null) return;
+        try {
+            ActivityTaskManager.getService().unregisterTaskStackListener(mTaskListener);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to unregister Settings watcher", e);
+        }
+        mTaskListener = null;
+    }
+
+    /**
+     * Flips spoofing on, reloads the configs system_server's own PIF and TrickyStore
+     * instances cached empty while off, starts the refresh schedule and restarts the
+     * GMS family, whose processes were started without a config.
+     */
+    private void enableSpoofing() {
+        if (mActivated) return;
+        mActivated = true;
+        Settings.Secure.putIntForUser(mResolver, ACTIVATED_KEY, 1, UserHandle.USER_SYSTEM);
+        unregisterSettingsWatcher();
+        Log.i(TAG, "Settings opened, enabling spoofing");
+        PlayIntegritySpoofService.getInstance().loadConfig();
+        TrickyStoreService.getInstance().initialize();
+        seedDefaultTargetsIfUnset();
+        scheduleFirstRefresh();
+        killGmsFamily();
     }
 
     private void refreshKey(String key) {
@@ -272,6 +352,7 @@ public class AxSpoofManager implements IAxSpoofManager {
      * to as text either.
      */
     private void onPackageAdded(String pkg) {
+        if (!mActivated) return;
         if (mResolver == null || TrickyStoreService.XPOSED_PACKAGES.contains(pkg)) return;
 
         String current = Settings.Secure.getStringForUser(
@@ -301,6 +382,7 @@ public class AxSpoofManager implements IAxSpoofManager {
      * or sooner while a fresh install is still missing its keybox or PIF config.
      */
     private void performScheduledRefresh() {
+        if (!mActivated) return;
         refreshNow();
         long delay = REFRESH_INTERVAL_MS;
         if (isBootstrapPending() && mBootstrapRetries < BOOTSTRAP_MAX_RETRIES) {
@@ -340,6 +422,7 @@ public class AxSpoofManager implements IAxSpoofManager {
 
     /** One fingerprint + keybox pass, without touching the hourly schedule. */
     private void refreshNow() {
+        if (!mActivated) return;
         // Keybox first: it is one small request, while the fingerprint crawl is
         // the slow one and shouldn't be able to starve it.
         try {
@@ -558,6 +641,12 @@ public class AxSpoofManager implements IAxSpoofManager {
     }
 
     private void killGmsFamily() {
+        // Never touch GMS/GSF before spoofing is activated (first Settings launch),
+        // so Setup Wizard is never disturbed.
+        if (!mActivated) {
+            Log.i(TAG, "Spoofing not activated, skipping GMS restart");
+            return;
+        }
         try {
             ActivityManager am = mContext.getSystemService(ActivityManager.class);
             for (String pkg : GMS_FAMILY) {
@@ -566,6 +655,12 @@ public class AxSpoofManager implements IAxSpoofManager {
         } catch (Exception e) {
             Log.w(TAG, "Failed to restart GMS family after refresh", e);
         }
+    }
+
+    private boolean isDeviceProvisioned() {
+        return Settings.Global.getInt(mResolver, Settings.Global.DEVICE_PROVISIONED, 0) != 0
+                && Settings.Secure.getIntForUser(mResolver,
+                        Settings.Secure.USER_SETUP_COMPLETE, 0, UserHandle.USER_SYSTEM) != 0;
     }
 
     /**
@@ -602,26 +697,31 @@ public class AxSpoofManager implements IAxSpoofManager {
 
     @Override
     public String getPifConfig() {
+        if (!mActivated) return null;
         return getCached(Settings.Secure.SPOOF_PIF_CONFIG);
     }
 
     @Override
     public String getGamePropsConfig() {
+        if (!mActivated) return null;
         return getCached(Settings.Secure.SPOOF_GAMEPROPS_CONFIG);
     }
 
     @Override
     public String getTrickyStoreTarget() {
+        if (!mActivated) return null;
         return getCached(Settings.Secure.SPOOF_TRICKYSTORE_TARGET);
     }
 
     @Override
     public String getTrickyStoreKeyBox() {
+        if (!mActivated) return null;
         return getCached(Settings.Secure.SPOOF_TRICKYSTORE_KEYBOX);
     }
 
     @Override
     public String getTrickyStorePatch() {
+        if (!mActivated) return null;
         return getCached(Settings.Secure.SPOOF_TRICKYSTORE_PATCH);
     }
 }
