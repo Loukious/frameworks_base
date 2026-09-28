@@ -405,6 +405,15 @@ public class AxSpoofManager implements IAxSpoofManager {
         if (matched == null || !PixelDeviceRepository.isValidFingerprint(matched.fingerprint)) {
             return;
         }
+        if (matched.fingerprint.equals(existing.optString("FINGERPRINT", ""))) {
+            // Nothing new. Without this, a fingerprint within the refetch window
+            // (or with no canary metadata) was rewritten and GMS restarted every
+            // day. Still start the cooldown so the crawl isn't repeated hourly.
+            Settings.Secure.putLongForUser(
+                    mResolver, LAST_AUTO_FETCH_KEY, System.currentTimeMillis(),
+                    UserHandle.USER_SYSTEM);
+            return;
+        }
 
         // Start from the saved config so flags set elsewhere (spoofVendingFinger,
         // spoofProps, ...) survive the refresh; PlayIntegritySpoofService falls back
