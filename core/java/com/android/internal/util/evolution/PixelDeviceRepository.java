@@ -624,6 +624,13 @@ public final class PixelDeviceRepository {
                         conn.setReadTimeout(15000);
                         String buildsJson = new String(
                                 conn.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                        if (!buildsJson.trim().startsWith("{")) {
+                            // An HTML bot-wall instead of JSON: every remaining device
+                            // would hit the same wall, so keep what we have.
+                            Log.w(TAG, "flashstation rate-limited at " + product
+                                    + ", stopping crawl");
+                            break;
+                        }
 
                         org.json.JSONObject root = new org.json.JSONObject(buildsJson);
                         org.json.JSONArray buildsArray = root.optJSONArray("flashstationBuild");
@@ -633,8 +640,11 @@ public final class PixelDeviceRepository {
                         String incremental = null;
                         String canaryId = null;
                         String factoryImageUrl = null;
+                        long bestBuildId = -1;
 
-                        for (int i = buildsArray.length() - 1; i >= 0; i--) {
+                        // Take the canary with the highest numeric buildId rather than
+                        // relying on the order the API returns them in.
+                        for (int i = 0; i < buildsArray.length(); i++) {
                             org.json.JSONObject b = buildsArray.optJSONObject(i);
                             if (b == null) continue;
                             org.json.JSONObject meta = b.optJSONObject("previewMetadata");
@@ -642,14 +652,21 @@ public final class PixelDeviceRepository {
                             String rc = b.optString("releaseCandidateName");
                             String bid = b.optString("buildId");
                             if (rc.isEmpty() || bid.isEmpty()) continue;
+                            long rank;
+                            try {
+                                rank = Long.parseLong(bid);
+                            } catch (NumberFormatException e) {
+                                rank = 0;
+                            }
+                            if (rank <= bestBuildId) continue;
+                            bestBuildId = rank;
                             id = rc;
                             incremental = bid;
                             String mid = meta.optString("id");
-                            if (mid.contains("canary-")) canaryId = mid;
+                            canaryId = mid.contains("canary-") ? mid : null;
                             String fiUrl = b.optString("factoryImageDownloadUrl");
                             if (fiUrl.isEmpty()) fiUrl = meta.optString("factoryImageDownloadUrl");
-                            if (!fiUrl.isEmpty()) factoryImageUrl = fiUrl;
-                            break;
+                            factoryImageUrl = fiUrl.isEmpty() ? null : fiUrl;
                         }
                         if (id == null || incremental == null) {
                             // No canary/beta build published for this device yet
@@ -677,7 +694,7 @@ public final class PixelDeviceRepository {
                         }
 
                         // Derive security patch from canary ID month (e.g. "canary-202605")
-                        String securityPatch = "2026-05-05"; // safe default
+                        String securityPatch = patchFromBuildId(id);
                         if (canaryId != null) {
                             java.util.regex.Matcher cm = java.util.regex.Pattern.compile(
                                     "canary-(\\d{4})(\\d{2})")
@@ -830,6 +847,17 @@ public final class PixelDeviceRepository {
 
         return new PixelProfile(device, model, "google", device, device, fingerprint,
                 buildId, securityPatch, now, null, false);
+    }
+
+    /**
+     * Derives YYYY-MM-05 from the YYMMDD segment of a build id, e.g.
+     * "ZP11.260618.005" -> "2026-06-05". Used when the canary metadata carries
+     * no month; falls back to a fixed date if the id has no such segment.
+     */
+    private static String patchFromBuildId(String id) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("\\.(\\d{2})(0[1-9]|1[0-2])\\d{2}\\.").matcher(id);
+        return m.find() ? "20" + m.group(1) + "-" + m.group(2) + "-05" : "2026-05-05";
     }
 
     private static String monthNumber(String month) {
