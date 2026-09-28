@@ -60,6 +60,35 @@ class DeviceEntryHapticsInteractorTest : SysuiTestCase() {
         }
 
     @Test
+    fun routedFingerprint_vibrateSuccess() =
+        kosmos.runTest {
+            val playSuccessHaptic by
+                collectLastValue(deviceEntryHapticsInteractor.playSuccessHapticOnDeviceEntry)
+            enrollFingerprint(FingerprintSensorType.UDFPS_ULTRASONIC)
+            runCurrent()
+
+            deviceEntryHapticsInteractor.onRoutedFingerprintAuthenticated()
+            runCurrent()
+
+            assertThat(playSuccessHaptic).isNotNull()
+        }
+
+    @Test
+    fun routedPowerButtonFingerprint_powerDown_doNotVibrateSuccess() =
+        kosmos.runTest {
+            val playSuccessHaptic by
+                collectLastValue(deviceEntryHapticsInteractor.playSuccessHapticOnDeviceEntry)
+            enrollFingerprint(FingerprintSensorType.POWER_BUTTON)
+            kosmos.fakeKeyEventRepository.setPowerButtonDown(true)
+            runCurrent()
+
+            deviceEntryHapticsInteractor.onRoutedFingerprintAuthenticated()
+            runCurrent()
+
+            assertThat(playSuccessHaptic).isNull()
+        }
+
+    @Test
     fun powerButtonFPS_vibrateSuccess() =
         kosmos.runTest {
             val playSuccessHaptic by

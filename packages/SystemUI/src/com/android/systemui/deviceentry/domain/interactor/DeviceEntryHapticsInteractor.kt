@@ -31,6 +31,7 @@ import com.android.systemui.util.kotlin.sample
 import com.android.systemui.util.time.SystemClock
 import javax.inject.Inject
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.combineTransform
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -60,6 +61,8 @@ constructor(
     private val systemClock: SystemClock,
     dumpManager: DumpManager,
 ) : FlowDumperImpl(dumpManager) {
+    private val routedFingerprintSuccess = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
     private val powerButtonSideFpsEnrolled =
         combineTransform(
                 fingerprintPropertyRepository.sensorType,
@@ -107,6 +110,31 @@ constructor(
             // map to Unit
             .map {}
 
+    private val playSuccessHapticOnRoutedFingerprint: Flow<Unit> =
+        routedFingerprintSuccess
+            .sample(
+                combine(
+                    powerButtonSideFpsEnrolled,
+                    powerButtonDown,
+                    lastPowerButtonWakeup,
+                    ::Triple,
+                )
+            )
+            .filter { (sideFpsEnrolled, powerButtonDown, lastPowerButtonWakeup) ->
+                val sideFpsAllowsHaptic =
+                    !powerButtonDown &&
+                        systemClock.uptimeMillis() - lastPowerButtonWakeup >
+                            recentPowerButtonPressThresholdMs
+                val allowHaptic = !sideFpsEnrolled || sideFpsAllowsHaptic
+                if (!allowHaptic) {
+                    logger.d(
+                        "Skip routed fingerprint success haptic. Recent power button press or button is down."
+                    )
+                }
+                allowHaptic
+            }
+            .map {}
+
     private val playSuccessHapticOnDeviceEntryFromDeviceEntryIcon: Flow<Unit> =
         deviceEntrySourceInteractor.attemptEnterDeviceFromDeviceEntryIcon
             .map { keyguardInteractor.isKeyguardDismissible.value }
@@ -123,14 +151,21 @@ constructor(
         if (Flags.msdlFeedback()) {
             merge(
                     playSuccessHapticOnDeviceEntryFromBiometricSource,
+                    playSuccessHapticOnRoutedFingerprint,
                     playSuccessHapticOnDeviceEntryFromDeviceEntryIcon,
                 )
                 .dumpWhileCollecting("playSuccessHaptic")
         } else {
-            playSuccessHapticOnDeviceEntryFromBiometricSource.dumpWhileCollecting(
-                "playSuccessHaptic"
-            )
+            merge(
+                    playSuccessHapticOnDeviceEntryFromBiometricSource,
+                    playSuccessHapticOnRoutedFingerprint,
+                )
+                .dumpWhileCollecting("playSuccessHaptic")
         }
+
+    fun onRoutedFingerprintAuthenticated() {
+        routedFingerprintSuccess.tryEmit(Unit)
+    }
 
     private val playErrorHapticForBiometricFailure: Flow<Unit> =
         merge(

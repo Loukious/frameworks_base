@@ -88,6 +88,7 @@ import com.android.systemui.classifier.FalsingA11yDelegate;
 import com.android.systemui.classifier.FalsingCollector;
 import com.android.systemui.dagger.qualifiers.Background;
 import com.android.systemui.deviceentry.domain.interactor.DeviceEntryFaceAuthInteractor;
+import com.android.systemui.deviceentry.domain.interactor.DeviceEntryHapticsInteractor;
 import com.android.systemui.deviceentry.domain.interactor.DeviceEntryInteractor;
 import com.android.systemui.flags.FeatureFlags;
 import com.android.systemui.keyguard.KeyguardWmStateRefactor;
@@ -365,6 +366,9 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
                 mRoutedBiometricReported = true;
                 mUpdateMonitor.reportSecureSpaceFingerprintAccepted(targetUserId,
                         mRoutedStrongBiometric);
+                if (mDeviceEntryHapticsInteractor != null) {
+                    mDeviceEntryHapticsInteractor.onRoutedFingerprintAuthenticated();
+                }
             }
             if (!SceneContainerFlag.isEnabled()) {
                 // If there's a pending runnable because the user interacted with a widget
@@ -504,6 +508,7 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
     private final Provider<JavaAdapter> mJavaAdapter;
     private final DeviceProvisionedController mDeviceProvisionedController;
     private com.android.systemui.securespaces.SecureSpaceEntryCoordinator mSecureSpaceEntry;
+    private DeviceEntryHapticsInteractor mDeviceEntryHapticsInteractor;
     private int mRoutedPrimaryUser = -1;
     private int mRoutedPrimarySerial = -1;
     private boolean mRoutedPolicyAllowsFinish;
@@ -604,6 +609,11 @@ public class KeyguardSecurityContainerController extends ViewController<Keyguard
     void setSecureSpaceEntryCoordinator(
             com.android.systemui.securespaces.SecureSpaceEntryCoordinator coordinator) {
         mSecureSpaceEntry = coordinator;
+    }
+
+    @Inject
+    void setDeviceEntryHapticsInteractor(DeviceEntryHapticsInteractor interactor) {
+        mDeviceEntryHapticsInteractor = interactor;
     }
 
     private final Lazy<PrimaryBouncerInteractor> mPrimaryBouncerInteractor;
