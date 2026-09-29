@@ -39,6 +39,19 @@ public class SecureSpaceFingerprintPolicyTest {
         assertNull(SecureSpaceFingerprintPolicy.resolve(
                 List.of(template(7,10,50,true,true,false)), 7,50,0,true));
     }
+    @Test public void keyguardIdentificationFindsLockedOwnerWithoutAuthenticatingIt() {
+        var locked = template(7, 10, 50, true, false, false);
+        assertEquals(locked, SecureSpaceFingerprintPolicy.identify(List.of(locked), 7, 50));
+        assertNull(SecureSpaceFingerprintPolicy.resolve(List.of(locked), 7, 50, 0, true));
+    }
+    @Test public void identificationStillRejectsStaleAmbiguousOrWrongSidOwnership() {
+        var locked = template(7, 10, 50, true, false, false);
+        assertNull(SecureSpaceFingerprintPolicy.identify(List.of(locked), 7, 51));
+        assertNull(SecureSpaceFingerprintPolicy.identify(
+                List.of(template(7,10,50,false,false,false)), 7, 50));
+        assertNull(SecureSpaceFingerprintPolicy.identify(
+                List.of(locked, template(7,0,55,true,true,true)), 7, 50));
+    }
     @Test public void tokenSidCannotBeRelabelledToMetadataUser() {
         assertNull(SecureSpaceFingerprintPolicy.resolve(
                 List.of(template(7,10,50,true,true,true)), 7,51,0,true));

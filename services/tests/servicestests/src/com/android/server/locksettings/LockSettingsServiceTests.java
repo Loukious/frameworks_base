@@ -116,6 +116,38 @@ public class LockSettingsServiceTests extends BaseLockSettingsServiceTests {
     }
 
     @Test
+    public void secureSpaceFingerprintOrigin_requiresExactCapturedSnapshot() throws RemoteException {
+        setAndVerifyCredential(PRIMARY_USER_ID, newPin("1234"));
+        when(mUserManager.isUserUnlocked(PRIMARY_USER_ID)).thenReturn(true);
+
+        LockSettingsInternal.SecureSpaceFingerprintOrigin origin =
+                mLocalService.captureSecureSpaceFingerprintOrigin(PRIMARY_USER_ID);
+        assertNotNull(origin);
+        assertTrue(mLocalService.isSecureSpaceFingerprintOriginCurrent(origin));
+
+        assertFalse(mLocalService.isSecureSpaceFingerprintOriginCurrent(
+                new LockSettingsInternal.SecureSpaceFingerprintOrigin(origin.userId(),
+                        origin.serialNumber() + 1, origin.foregroundGeneration(),
+                        origin.sessionEpoch(), origin.protectorId())));
+        assertFalse(mLocalService.isSecureSpaceFingerprintOriginCurrent(
+                new LockSettingsInternal.SecureSpaceFingerprintOrigin(origin.userId(),
+                        origin.serialNumber(), origin.foregroundGeneration() + 1,
+                        origin.sessionEpoch(), origin.protectorId())));
+        assertFalse(mLocalService.isSecureSpaceFingerprintOriginCurrent(
+                new LockSettingsInternal.SecureSpaceFingerprintOrigin(origin.userId(),
+                        origin.serialNumber(), origin.foregroundGeneration(),
+                        origin.sessionEpoch() + 1, origin.protectorId())));
+        assertFalse(mLocalService.isSecureSpaceFingerprintOriginCurrent(
+                new LockSettingsInternal.SecureSpaceFingerprintOrigin(origin.userId(),
+                        origin.serialNumber(), origin.foregroundGeneration(),
+                        origin.sessionEpoch(), origin.protectorId() + 1)));
+        assertFalse(mLocalService.isSecureSpaceFingerprintOriginCurrent(
+                new LockSettingsInternal.SecureSpaceFingerprintOrigin(SECONDARY_USER_ID,
+                        mSecondaryUserInfo.serialNumber, origin.foregroundGeneration(),
+                        origin.sessionEpoch(), origin.protectorId())));
+    }
+
+    @Test
     @DisableFlags({
         android.security.Flags.FLAG_APP_LOCK_APIS,
         android.security.Flags.FLAG_MOVE_NOTIFY_LOCK_CREDENTIAL_CALLS,

@@ -290,6 +290,43 @@ public class UserControllerTest {
     }
 
     @Test
+    public void switchUserIfCurrent_startsOnlyFromExpectedIdleOrigin() {
+        setUpUser(TEST_USER_ID1, DEFAULT_USER_FLAGS);
+        mInjector.mHandler.mRunCallbacksImmediately = false;
+
+        assertTrue(mUserController.switchUserIfCurrent(SYSTEM_USER_ID, TEST_USER_ID1));
+
+        var users = mUserController.getCurrentAndTargetUserIds();
+        assertEquals(SYSTEM_USER_ID, users.first.intValue());
+        assertEquals(TEST_USER_ID1, users.second.intValue());
+    }
+
+    @Test
+    public void switchUserIfCurrent_busySwitchRefusesInsteadOfQueuing() {
+        setUpUser(TEST_USER_ID1, DEFAULT_USER_FLAGS);
+        setUpUser(TEST_USER_ID2, DEFAULT_USER_FLAGS);
+        mInjector.mHandler.mRunCallbacksImmediately = false;
+
+        assertTrue(mUserController.switchUser(TEST_USER_ID1));
+        assertFalse(mUserController.switchUserIfCurrent(SYSTEM_USER_ID, TEST_USER_ID2));
+
+        var users = mUserController.getCurrentAndTargetUserIds();
+        assertEquals(SYSTEM_USER_ID, users.first.intValue());
+        assertEquals(TEST_USER_ID1, users.second.intValue());
+    }
+
+    @Test
+    public void switchUserIfCurrent_wrongOriginFailsClosed() {
+        setUpUser(TEST_USER_ID1, DEFAULT_USER_FLAGS);
+
+        assertFalse(mUserController.switchUserIfCurrent(TEST_USER_ID2, TEST_USER_ID1));
+
+        var users = mUserController.getCurrentAndTargetUserIds();
+        assertEquals(SYSTEM_USER_ID, users.first.intValue());
+        assertEquals(UserHandle.USER_NULL, users.second.intValue());
+    }
+
+    @Test
     public void testStartUser_foreground() {
         mInjector.mHandler.mRunCallbacksImmediately = false;
         mUserController.startUser(TEST_USER_ID, USER_START_MODE_FOREGROUND);

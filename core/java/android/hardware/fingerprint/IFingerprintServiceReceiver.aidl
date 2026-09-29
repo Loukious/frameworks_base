@@ -35,4 +35,8 @@ oneway interface IFingerprintServiceReceiver {
     void onUdfpsOverlayShown();
     void onSecureSpaceAuthenticationSucceeded(IBinder token, int originUserId, int originSerial,
             int destinationUserId, int destinationSerial, boolean strongBiometric);
+    void onSecureSpaceIdentificationSucceeded(int sensorId, int fingerId, int originUserId,
+            int originSerial, long originForegroundGeneration, long originSessionEpoch,
+            long originProtectorId, int destinationUserId, int destinationSerial,
+            long destinationSecureUserId, long destinationProtectorId);
 }

@@ -45,6 +45,12 @@ public class FingerprintServiceReceiver extends IFingerprintServiceReceiver.Stub
             throws RemoteException {}
 
     @Override
+    public void onSecureSpaceIdentificationSucceeded(int sensorId, int fingerId, int originUserId,
+            int originSerial, long originForegroundGeneration, long originSessionEpoch,
+            long originProtectorId, int destinationUserId, int destinationSerial,
+            long destinationSecureUserId, long destinationProtectorId) throws RemoteException {}
+
+    @Override
     public void onFingerprintDetected(int sensorId, int userId, boolean isStrongBiometric)
             throws RemoteException {
 

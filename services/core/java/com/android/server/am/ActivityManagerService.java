@@ -18117,6 +18117,11 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
 
         @Override
+        public boolean switchUserIfCurrent(int expectedCurrentUserId, int targetUserId) {
+            return mUserController.switchUserIfCurrent(expectedCurrentUserId, targetUserId);
+        }
+
+        @Override
         public int getCurrentUserId() {
             return mUserController.getCurrentUserId();
         }

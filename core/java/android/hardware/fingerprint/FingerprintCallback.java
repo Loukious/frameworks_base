@@ -177,6 +177,18 @@ public class FingerprintCallback {
         }
     }
 
+    public void sendSecureSpaceIdentificationSucceeded(int sensorId, int fingerId,
+            int originUserId, int originSerial, long originForegroundGeneration,
+            long originSessionEpoch, long originProtectorId, int destinationUserId,
+            int destinationSerial, long destinationSecureUserId, long destinationProtectorId) {
+        if (mAuthenticationCallback != null) {
+            mAuthenticationCallback.onSecureSpaceIdentificationSucceeded(sensorId, fingerId,
+                    originUserId, originSerial, originForegroundGeneration, originSessionEpoch,
+                    originProtectorId, destinationUserId, destinationSerial,
+                    destinationSecureUserId, destinationProtectorId);
+        }
+    }
+
     public void sendAuthenticatedFailed() {
         if (mAuthenticationCallback != null) {
             mAuthenticationCallback.onAuthenticationFailed();

@@ -12,6 +12,21 @@ final class SecureSpaceFingerprintPolicy {
 
     static Template resolve(List<Template> templates, int fingerId, long signedSecureUserId,
             int requestedUserId, boolean trustedKeyguard) {
+        Template owner = identify(templates, fingerId, signedSecureUserId);
+        if (owner == null) return null;
+        if (trustedKeyguard) {
+            return owner.storageUnlocked() && owner.strongAuthAllowed() ? owner : null;
+        }
+        return owner.userId() == requestedUserId ? owner : null;
+    }
+
+    /**
+     * Resolves only the cryptographic/native ownership of a template.
+     *
+     * This deliberately does not grant authentication. Keyguard may use the result to select a
+     * separately locked Secure Space and then require that user's primary credential.
+     */
+    static Template identify(List<Template> templates, int fingerId, long signedSecureUserId) {
         // Native template IDs are opaque uint32 values represented by signed Java ints.
         if (fingerId == 0 || signedSecureUserId == 0) return null;
         Template owner = null;
@@ -23,9 +38,6 @@ final class SecureSpaceFingerprintPolicy {
         }
         if (owner == null || !owner.bindingCurrent() || owner.secureUserId() == 0
                 || owner.secureUserId() != signedSecureUserId) return null;
-        if (trustedKeyguard) {
-            return owner.storageUnlocked() && owner.strongAuthAllowed() ? owner : null;
-        }
-        return owner.userId() == requestedUserId ? owner : null;
+        return owner;
     }
 }

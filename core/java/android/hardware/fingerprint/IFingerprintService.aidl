@@ -32,6 +32,7 @@ import android.hardware.fingerprint.FingerprintAuthenticateOptions;
 import android.hardware.fingerprint.FingerprintEnrollOptions;
 import android.hardware.fingerprint.FingerprintSensorPropertiesInternal;
 import android.hardware.fingerprint.FingerprintSensorConfigurations;
+import com.android.internal.widget.ISecureSpaceCredentialAttempt;
 import java.util.List;
 
 /**
@@ -224,4 +225,15 @@ interface IFingerprintService {
     oneway void scheduleWatchdog();
     // Trusted keyguard-only union availability; no public user/template metadata.
     boolean hasSecureSpaceRoutingCandidate(String opPackageName);
+    // Trusted keyguard-only freshness check before an identification-only concealed-user switch.
+    boolean isSecureSpaceIdentificationCurrent(String opPackageName, int sensorId, int fingerId,
+            int originUserId, int originSerial, long originForegroundGeneration,
+            long originSessionEpoch, long originProtectorId, int destinationUserId,
+            int destinationSerial, long destinationSecureUserId, long destinationProtectorId);
+    // Trusted keyguard-only atomic switch; refuses instead of queuing behind another user switch.
+    boolean switchSecureSpaceIdentification(String opPackageName, int sensorId, int fingerId,
+            int originUserId, int originSerial, long originForegroundGeneration,
+            long originSessionEpoch, long originProtectorId, int destinationUserId,
+            int destinationSerial, long destinationSecureUserId, long destinationProtectorId,
+            ISecureSpaceCredentialAttempt witness);
 }

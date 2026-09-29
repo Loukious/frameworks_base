@@ -4895,6 +4895,66 @@ public class LockSettingsService extends ILockSettings.Stub {
         }
 
         @Override
+        public boolean isSecureSpaceFingerprintOriginCurrent(
+                SecureSpaceFingerprintOrigin originSnapshot) {
+            if (originSnapshot == null || mSecureAuthErasureStarted.get()
+                    || ActivityManager.getCurrentUser() != originSnapshot.userId()) {
+                return false;
+            }
+            UserInfo origin = mUserManager.getUserInfo(originSnapshot.userId());
+            if (!isSecureSpaceRoutingUser(origin)
+                    || origin.serialNumber != originSnapshot.serialNumber()
+                    || mSecureSpaceForegroundGeneration.get()
+                            != originSnapshot.foregroundGeneration()
+                    || mSecureSpaceSessionEpoch.get() != originSnapshot.sessionEpoch()) {
+                return false;
+            }
+            SecureLockDeviceServiceInternal secureLock =
+                    LocalServices.getService(SecureLockDeviceServiceInternal.class);
+            if (secureLock != null && secureLock.isSecureLockDeviceEnabled()) return false;
+            synchronized (mSpManager) {
+                if (getCurrentLskfBasedProtectorId(origin.id) != originSnapshot.protectorId()) {
+                    return false;
+                }
+            }
+            // getSecureSpaceFingerprintIdentity() reads DevicePolicyManager. Never hold an LSS
+            // lock across that higher-level service call (see Injector#getDevicePolicyManager()).
+            SecureSpaceFingerprintIdentity identity = getSecureSpaceFingerprintIdentity(origin.id);
+            if (identity == null || identity.serialNumber() != originSnapshot.serialNumber()
+                    || identity.protectorId() != originSnapshot.protectorId()
+                    || !identity.storageUnlocked() || !identity.strongAuthAllowed()) {
+                return false;
+            }
+            // Identity resolution crosses DPM/Settings and can take long enough for a screen-off,
+            // user switch, Secure Lock activation, or user recreation to invalidate the touch.
+            // Re-sample every origin invariant after that work and make the protector comparison
+            // the final LockSettings-local check before accepting the snapshot.
+            UserInfo currentOrigin = mUserManager.getUserInfo(originSnapshot.userId());
+            if (mSecureAuthErasureStarted.get()
+                    || ActivityManager.getCurrentUser() != originSnapshot.userId()
+                    || !isSecureSpaceRoutingUser(currentOrigin)
+                    || currentOrigin.serialNumber != originSnapshot.serialNumber()
+                    || mSecureSpaceForegroundGeneration.get()
+                            != originSnapshot.foregroundGeneration()
+                    || mSecureSpaceSessionEpoch.get() != originSnapshot.sessionEpoch()) {
+                return false;
+            }
+            secureLock = LocalServices.getService(SecureLockDeviceServiceInternal.class);
+            if (secureLock != null && secureLock.isSecureLockDeviceEnabled()) return false;
+            if (!mUserManager.isUserUnlocked(originSnapshot.userId())
+                    || mStrongAuthTracker.getStrongAuthForUser(originSnapshot.userId()) != 0
+                    || !java.util.Objects.equals(
+                            mSecureSpacePrimaryGenerations.get(originSnapshot.userId()),
+                            mStrongAuth.getRequirementGeneration(originSnapshot.userId()))) {
+                return false;
+            }
+            synchronized (mSpManager) {
+                return getCurrentLskfBasedProtectorId(originSnapshot.userId())
+                        == originSnapshot.protectorId();
+            }
+        }
+
+        @Override
         public IBinder issueSecureSpaceFingerprintHandoff(SecureSpaceFingerprintIdentity destination,
                 SecureSpaceFingerprintOrigin originSnapshot, IBinder clientToken) {
             if (destination == null || originSnapshot == null || clientToken == null
@@ -4903,6 +4963,20 @@ public class LockSettingsService extends ILockSettings.Stub {
                 return null;
             }
             int originUserId = originSnapshot.userId();
+            // Resolve policy/strong-auth state before taking any LockSettingsService lock because
+            // identity resolution calls DevicePolicyManager.
+            SecureSpaceFingerprintIdentity current =
+                    getSecureSpaceFingerprintIdentity(destination.userId());
+            if (current == null || !current.storageUnlocked() || !current.strongAuthAllowed()
+                    || current.serialNumber() != destination.serialNumber()
+                    || current.secureUserId() != destination.secureUserId()
+                    || current.protectorId() != destination.protectorId()) {
+                Slog.w(TAG, "Fingerprint handoff destination rejected: identity="
+                        + (current != null) + " storage="
+                        + (current != null && current.storageUnlocked()) + " strongAuth="
+                        + (current != null && current.strongAuthAllowed()));
+                return null;
+            }
             synchronized (mSecureSpaceCredentialLock) {
                 if (mSecureAuthErasureStarted.get() || !isSecureSpaceScreenInteractive()
                         || ActivityManager.getCurrentUser() != originUserId) {
@@ -4931,20 +5005,25 @@ public class LockSettingsService extends ILockSettings.Stub {
                 }
                 long foreground = mSecureSpaceForegroundGeneration.get();
                 long epoch = mSecureSpaceSessionEpoch.get();
+                final IBinder token;
+                final SecureSpaceCredentialHandoff.Grant grant;
+                final SecureSpaceLease lease;
                 synchronized (mSpManager) {
-                    SecureSpaceFingerprintIdentity current = getSecureSpaceFingerprintIdentity(destination.userId());
-                    if (current == null || !current.storageUnlocked() || !current.strongAuthAllowed()
-                            || current.serialNumber() != destination.serialNumber()
-                            || current.secureUserId() != destination.secureUserId()
-                            || current.protectorId() != destination.protectorId()) {
-                        Slog.w(TAG, "Fingerprint handoff destination rejected: identity="
-                                + (current != null) + " storage="
-                                + (current != null && current.storageUnlocked()) + " strongAuth="
-                                + (current != null && current.strongAuthAllowed()));
-                        return null;
-                    }
                     if (getCurrentLskfBasedProtectorId(originUserId) != originSnapshot.protectorId()) {
                         Slog.w(TAG, "Fingerprint handoff origin protector changed");
+                        return null;
+                    }
+                    if (getCurrentLskfBasedProtectorId(current.userId()) != current.protectorId()) {
+                        Slog.w(TAG, "Fingerprint handoff destination protector changed");
+                        return null;
+                    }
+                    try {
+                        if (getGateKeeperService().getSecureUserId(current.userId())
+                                != current.secureUserId()) {
+                            Slog.w(TAG, "Fingerprint handoff destination SID changed");
+                            return null;
+                        }
+                    } catch (RemoteException error) {
                         return null;
                     }
                     int originType = getCredentialTypeInternal(originUserId);
@@ -4957,8 +5036,8 @@ public class LockSettingsService extends ILockSettings.Stub {
                         Slog.w(TAG, "Fingerprint handoff secure lock active");
                         return null;
                     }
-                    IBinder token = new Binder();
-                    var grant = mSecureSpaceHandoff.issue(token,
+                    token = new Binder();
+                    grant = mSecureSpaceHandoff.issue(token,
                             new SecureSpaceCredentialRouter.Candidate(origin.id, origin.serialNumber),
                             new SecureSpaceCredentialRouter.Candidate(current.userId(), current.serialNumber()),
                             getCurrentLskfBasedProtectorId(origin.id), current.protectorId(), foreground, epoch,
@@ -4974,23 +5053,26 @@ public class LockSettingsService extends ILockSettings.Stub {
                         }
                         @Override public void invalidate() { alive.set(false); }
                     };
-                    SecureSpaceLease lease = new SecureSpaceLease(grant, initialWitness, true);
+                    lease = new SecureSpaceLease(grant, initialWitness, true);
                     revokeSecureSpaceLease(mSecureSpaceLease.getAndSet(lease));
                     mSecureSpaceCredentialAttempt = initialWitness;
                     mHandler.postDelayed(() -> {
                         if (mSecureSpaceLease.compareAndSet(lease, null)) revokeSecureSpaceLease(lease);
                     }, 30_000);
-                    if (!isSecureSpaceGrantIdentityCurrent(grant)
-                            || mSecureSpaceSessionEpoch.get() != epoch
-                            || mSecureSpaceForegroundGeneration.get() != foreground
-                            || ActivityManager.getCurrentUser() != origin.id) {
-                        revokeSecureSpaceLease(lease);
-                        mSecureSpaceHandoff.clear();
-                        Slog.w(TAG, "Fingerprint handoff grant became stale");
-                        return null;
-                    }
-                    return token;
                 }
+                // Do not call ActivityManager/UserManager/PowerManager while mSpManager is held.
+                if (!isSecureSpaceGrantIdentityCurrent(grant)
+                        || mSecureSpaceSessionEpoch.get() != epoch
+                        || mSecureSpaceForegroundGeneration.get() != foreground
+                        || ActivityManager.getCurrentUser() != origin.id) {
+                    revokeSecureSpaceLease(lease);
+                    synchronized (mSpManager) {
+                        mSecureSpaceHandoff.clear();
+                    }
+                    Slog.w(TAG, "Fingerprint handoff grant became stale");
+                    return null;
+                }
+                return token;
             }
         }
 
@@ -4999,32 +5081,80 @@ public class LockSettingsService extends ILockSettings.Stub {
             if (mSecureAuthErasureStarted.get()) return null;
             UserInfo user = mUserManager.getUserInfo(userId);
             if (user == null || !user.isFull() || user.partial || user.preCreated
-                    || !user.isEnabled() || (user.id != 0
+                    || !user.isEnabled() || !user.isInitialized() || (user.id != 0
                         && !UserManager.USER_TYPE_FULL_SECURE_SPACE.equals(user.userType))) return null;
+            final int serial = user.serialNumber;
+            int disabled = mInjector.getDevicePolicyManager().getKeyguardDisabledFeatures(null, userId);
+            int biometricDefault = Settings.Secure.getIntForUser(
+                    mContext.getContentResolver(), Settings.Secure.BIOMETRIC_KEYGUARD_ENABLED,
+                    1, userId);
+            boolean keyguardEnabled = Settings.Secure.getIntForUser(
+                    mContext.getContentResolver(), Settings.Secure.FINGERPRINT_KEYGUARD_ENABLED,
+                    biometricDefault == 1 ? 1 : 0, userId) != 0;
+            final long sid;
+            final long protector;
+            final int type;
             synchronized (mSpManager) {
                 try {
-                    long sid = getGateKeeperService().getSecureUserId(userId);
-                    long protector = getCurrentLskfBasedProtectorId(userId);
+                    sid = getGateKeeperService().getSecureUserId(userId);
+                    protector = getCurrentLskfBasedProtectorId(userId);
                     if (sid == 0 || protector == 0) return null;
-                    int type = getCredentialTypeInternal(userId);
-                    boolean entryType = type == CREDENTIAL_TYPE_PIN || type == CREDENTIAL_TYPE_PASSWORD;
-                    int disabled = mContext.getSystemService(DevicePolicyManager.class)
-                            .getKeyguardDisabledFeatures(null, userId);
-                    int biometricDefault = Settings.Secure.getIntForUser(
-                            mContext.getContentResolver(), Settings.Secure.BIOMETRIC_KEYGUARD_ENABLED,
-                            1, userId);
-                    boolean keyguardEnabled = Settings.Secure.getIntForUser(
-                            mContext.getContentResolver(), Settings.Secure.FINGERPRINT_KEYGUARD_ENABLED,
-                            biometricDefault == 1 ? 1 : 0, userId) != 0;
-                    boolean allowed = entryType && keyguardEnabled
-                            && mStrongAuthTracker.getStrongAuthForUser(userId) == 0
-                            && java.util.Objects.equals(mSecureSpacePrimaryGenerations.get(userId),
-                                    mStrongAuth.getRequirementGeneration(userId))
-                            && (disabled & DevicePolicyManager.KEYGUARD_DISABLE_FINGERPRINT) == 0;
-                    return new SecureSpaceFingerprintIdentity(userId, user.serialNumber, sid,
-                            protector, mUserManager.isUserUnlocked(userId), allowed);
+                    type = getCredentialTypeInternal(userId);
                 } catch (RemoteException e) {
                     return null;
+                }
+            }
+            boolean entryType = type == CREDENTIAL_TYPE_PIN || type == CREDENTIAL_TYPE_PASSWORD;
+            boolean allowed = entryType && keyguardEnabled
+                    && mStrongAuthTracker.getStrongAuthForUser(userId) == 0
+                    && java.util.Objects.equals(mSecureSpacePrimaryGenerations.get(userId),
+                            mStrongAuth.getRequirementGeneration(userId))
+                    && (disabled & DevicePolicyManager.KEYGUARD_DISABLE_FINGERPRINT) == 0;
+            boolean unlocked = mUserManager.isUserUnlocked(userId);
+            // Strong-auth and unlock state above can cross service/handler boundaries. Make user
+            // identity plus the native SID/protector pair the final validation before returning so
+            // a recreation or protector rotation cannot produce a hybrid identity snapshot.
+            UserInfo currentUser = mUserManager.getUserInfo(userId);
+            if (!isSecureSpaceRoutingUser(currentUser) || currentUser.serialNumber != serial
+                    || mSecureAuthErasureStarted.get()) {
+                return null;
+            }
+            synchronized (mSpManager) {
+                try {
+                    if (getCurrentLskfBasedProtectorId(userId) != protector
+                            || getGateKeeperService().getSecureUserId(userId) != sid) {
+                        return null;
+                    }
+                } catch (RemoteException e) {
+                    return null;
+                }
+            }
+            if (allowed && (mStrongAuthTracker.getStrongAuthForUser(userId) != 0
+                    || !java.util.Objects.equals(mSecureSpacePrimaryGenerations.get(userId),
+                            mStrongAuth.getRequirementGeneration(userId)))) {
+                allowed = false;
+            }
+            return new SecureSpaceFingerprintIdentity(userId, serial, sid,
+                    protector, unlocked, allowed);
+        }
+
+        @Override
+        public boolean isSecureSpaceFingerprintIdentityCurrent(
+                SecureSpaceFingerprintIdentity identity) {
+            if (identity == null || mSecureAuthErasureStarted.get()) return false;
+            UserInfo user = mUserManager.getUserInfo(identity.userId());
+            if (!isSecureSpaceRoutingUser(user)
+                    || user.serialNumber != identity.serialNumber()) {
+                return false;
+            }
+            synchronized (mSpManager) {
+                try {
+                    return getCurrentLskfBasedProtectorId(identity.userId())
+                                    == identity.protectorId()
+                            && getGateKeeperService().getSecureUserId(identity.userId())
+                                    == identity.secureUserId();
+                } catch (RemoteException e) {
+                    return false;
                 }
             }
         }
@@ -5053,12 +5183,22 @@ public class LockSettingsService extends ILockSettings.Stub {
         public boolean recordSecureSpaceFingerprintEnrollment(int sensorId, int fingerId,
                 SecureSpaceFingerprintIdentity identity) {
             if (sensorId < 0 || fingerId == 0 || identity == null) return false;
+            SecureSpaceFingerprintIdentity current =
+                    getSecureSpaceFingerprintIdentity(identity.userId());
+            if (current == null || !current.storageUnlocked()
+                    || current.serialNumber() != identity.serialNumber()
+                    || current.secureUserId() != identity.secureUserId()
+                    || current.protectorId() != identity.protectorId()) return false;
             synchronized (mSpManager) {
-                SecureSpaceFingerprintIdentity current = getSecureSpaceFingerprintIdentity(identity.userId());
-                if (current == null || !current.storageUnlocked()
-                        || current.serialNumber() != identity.serialNumber()
-                        || current.secureUserId() != identity.secureUserId()
-                        || current.protectorId() != identity.protectorId()) return false;
+                if (getCurrentLskfBasedProtectorId(current.userId()) != current.protectorId()) {
+                    return false;
+                }
+                try {
+                    if (getGateKeeperService().getSecureUserId(current.userId())
+                            != current.secureUserId()) return false;
+                } catch (RemoteException error) {
+                    return false;
+                }
                 mStorage.setString(fingerprintBindingKey(sensorId, fingerId),
                         fingerprintBinding(current), identity.userId());
                 return true;

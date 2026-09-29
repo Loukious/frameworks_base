@@ -53,11 +53,16 @@ public final class SecureSpaceEntryCoordinator {
         void onRejected(SecureSpaceCredentialResponse response);
         /** The native match is now owned by this coordinator, not by the source coroutine. */
         default void onAccepted() {}
+        /** Server-side authorization for an identification switch, separate from UI liveness. */
+        default boolean isIdentificationCurrent() { return false; }
+        /** Atomic server-side switch which must refuse rather than queue behind another switch. */
+        default boolean switchIdentification(ISecureSpaceCredentialAttempt witness) { return false; }
         default boolean isActive() { return true; }
         default void onCurrentUserChecked(VerifyCredentialResponse response) {}
     }
 
     private static final long LIFETIME_MS = 30_000;
+    private static final long IDENTIFICATION_SWITCH_TIMEOUT_MS = 10_000;
     interface Backend {
         int credentialType(int userId);
         SecureSpaceCredentialResponse check(LockscreenCredential input, int userId, int serial,
@@ -135,6 +140,10 @@ public final class SecureSpaceEntryCoordinator {
     private volatile Request mConsumedRequest;
     private record AggregateLockout(int userId, int serial, long endTime) {}
     private volatile AggregateLockout mAggregateLockout;
+    private record IdentificationSwitch(int origin, int originSerial, int destination,
+            int destinationSerial, Callback source, AtomicBoolean active,
+            ISecureSpaceCredentialAttempt witness) {}
+    private volatile IdentificationSwitch mIdentificationSwitch;
 
     /** Hardware retry for one inactive user cannot disable healthy alternatives. */
     public long getLockoutEndTimeMillis() {
@@ -224,6 +233,10 @@ public final class SecureSpaceEntryCoordinator {
                 if (proof != null) proof.active.set(false);
                 mPublishedProof = null;
                 mConsumedRequest = null;
+                IdentificationSwitch identification = mIdentificationSwitch;
+                if (identification != null && identification.destination() != newUser) {
+                    clearIdentificationSwitch(identification);
+                }
                 Request request = mRequest;
                 if (request != null && (!request.switchRequested.get()
                         || request.destination != newUser)) cancel();
@@ -233,6 +246,15 @@ public final class SecureSpaceEntryCoordinator {
         }
         @Override
         public void onUserChanged(int newUser, Context context) {
+            IdentificationSwitch identification = mIdentificationSwitch;
+            if (identification != null) {
+                if (identification.destination() == newUser) {
+                    Log.d(TAG, "Fingerprint identification switch completed; destination=" + newUser);
+                    clearIdentificationSwitch(identification);
+                } else if (identification.origin() != newUser) {
+                    clearIdentificationSwitch(identification);
+                }
+            }
             Request request = mRequest;
             if (request != null && request.switchRequested.get()
                     && request.destination == newUser) {
@@ -355,6 +377,7 @@ public final class SecureSpaceEntryCoordinator {
 
     /** A deliberate prepared switch may destroy the source view without abandoning its proof. */
     public void onSourcePaused() {
+        if (mIdentificationSwitch != null) return;
         if (mConsumedRequest != null) { cancel(); return; }
         if (mRequest != null && !mRequest.switchRequested.get()) cancel();
     }
@@ -381,8 +404,14 @@ public final class SecureSpaceEntryCoordinator {
         return request != null && request.callback == callback && request.switchRequested.get();
     }
 
-    /** Native-proof-backed switch in progress; ordinary user switching remains unchanged. */
+    /** Coordinator-authorized concealed switch; ordinary public user switching is unchanged. */
     public boolean isAuthorizedSwitchTo(int userId) {
+        IdentificationSwitch identification = mIdentificationSwitch;
+        if (identification != null && identification.active().get()
+                && identification.destination() == userId
+                && hasIdentity(identification.destination(), identification.destinationSerial())) {
+            return true;
+        }
         Request request = mRequest;
         return request != null && request.token != null && request.switchRequested.get()
                 && request.destination == userId && request.isActive()
@@ -390,6 +419,8 @@ public final class SecureSpaceEntryCoordinator {
     }
 
     public boolean isSwitchInProgress() {
+        IdentificationSwitch identification = mIdentificationSwitch;
+        if (identification != null && identification.active().get()) return true;
         Request request = mRequest;
         return request != null && request.token != null && request.switchRequested.get()
                 && request.isActive();
@@ -407,6 +438,8 @@ public final class SecureSpaceEntryCoordinator {
     public void cancel() {
         if (mRequest != null) Log.d(TAG, "Entry canceled; prepared=" + mRequest.prepared
                 + ", token=" + (mRequest.token != null));
+        IdentificationSwitch identification = mIdentificationSwitch;
+        if (identification != null) clearIdentificationSwitch(identification);
         setSecondaryPolicyVisible(false);
         Request consumed = mConsumedRequest;
         mConsumedRequest = null;
@@ -499,6 +532,90 @@ public final class SecureSpaceEntryCoordinator {
             SecureSpaceCredentialResponse completed = response;
             mMain.execute(() -> onChecked(request, completed));
         });
+    }
+
+    /**
+     * Uses a cryptographically identified fingerprint only to choose a locked Secure Space.
+     * No authentication proof is created or consumed; the destination's normal primary
+     * credential remains mandatory after the switch.
+     */
+    public boolean acceptFingerprintIdentification(int origin, int originSerial, int destination,
+            int destinationSerial, Callback source) {
+        cancel();
+        if (source == null || destination == origin || isErasurePending() || !isAvailable()
+                || !source.isActive() || !mPower.isInteractive() || mUserTracker.isUserSwitching()
+                || mUserTracker.getUserId() != origin || mSelectedUser.getSelectedUserId() != origin
+                || mBackend.currentUser() != origin || !hasIdentity(origin, originSerial)
+                || !hasIdentity(destination, destinationSerial)
+                || !mUsers.isUserUnlocked(UserHandle.of(origin))
+                || mUsers.hasUserRestriction(UserManager.DISALLOW_USER_SWITCH,
+                        UserHandle.of(origin))) {
+            return false;
+        }
+        AtomicBoolean identificationActive = new AtomicBoolean(true);
+        ISecureSpaceCredentialAttempt identificationWitness =
+                new ISecureSpaceCredentialAttempt.Stub() {
+                    @Override public boolean isActive() { return identificationActive.get(); }
+                    @Override public void invalidate() { identificationActive.set(false); }
+                };
+        IdentificationSwitch identification = new IdentificationSwitch(origin, originSerial,
+                destination, destinationSerial, source, identificationActive,
+                identificationWitness);
+        mIdentificationSwitch = identification;
+        source.onAccepted();
+        mMain.executeDelayed(() -> {
+            if (mIdentificationSwitch != identification || !identification.active().get()) return;
+            Log.w(TAG, "Fingerprint identification switch timed out");
+            clearIdentificationSwitch(identification);
+            if (mSelectedUser.getSelectedUserId() == origin && source.isActive()) {
+                source.onRejected(SecureSpaceCredentialResponse.unavailable());
+            }
+        }, IDENTIFICATION_SWITCH_TIMEOUT_MS);
+        mBackground.execute(() -> {
+            boolean switched = false;
+            try {
+                boolean locallyCurrent = identification.active().get() && source.isActive()
+                        && mPower.isInteractive() && !mUserTracker.isUserSwitching()
+                        && mUserTracker.getUserId() == origin
+                        && mSelectedUser.getSelectedUserId() == origin
+                        && mBackend.currentUser() == origin;
+                boolean serverCurrent = locallyCurrent && source.isIdentificationCurrent();
+                // isIdentificationCurrent() may block on system_server. Cancellation, screen
+                // state, selected user, or another user switch can all change while it runs, so
+                // every local authorization input must be sampled again after that RPC.
+                switched = serverCurrent && identification.active().get() && source.isActive()
+                        && mPower.isInteractive() && !mUserTracker.isUserSwitching()
+                        && mUserTracker.getUserId() == origin
+                        && mSelectedUser.getSelectedUserId() == origin
+                        && mBackend.currentUser() == origin
+                        && !mUserTracker.isUserSwitching()
+                        && source.switchIdentification(identification.witness());
+            } catch (Exception error) {
+                switched = false;
+            }
+            final boolean accepted = switched;
+            mMain.execute(() -> {
+                if (mIdentificationSwitch != identification
+                        || !identification.active().get()) return;
+                if (!accepted) {
+                    Log.w(TAG, "Fingerprint identification user switch rejected");
+                    clearIdentificationSwitch(identification);
+                    if (mSelectedUser.getSelectedUserId() == origin && source.isActive()) {
+                        source.onRejected(SecureSpaceCredentialResponse.unavailable());
+                    }
+                    return;
+                }
+                Log.d(TAG, "Fingerprint identification switch requested; destination="
+                        + destination);
+            });
+        });
+        return true;
+    }
+
+    private void clearIdentificationSwitch(IdentificationSwitch identification) {
+        if (identification == null) return;
+        identification.active().set(false);
+        if (mIdentificationSwitch == identification) mIdentificationSwitch = null;
     }
 
     public void acceptFingerprint(IBinder token, int origin, int originSerial, int destination,

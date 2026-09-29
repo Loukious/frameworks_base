@@ -214,11 +214,61 @@ public class FingerprintAuthenticationClient
             // Ordinary keyguard without spaces keeps the existing native credential policy.
             boolean needsOwnership = concealed
                     || SecureSpaceFingerprintPool.hasConcealedUsers(getContext());
-            var destination = needsOwnership && identifier != null
+            var lockSettings = LocalServices.getService(LockSettingsInternal.class);
+            boolean currentIdentificationOrigin = mSecureSpaceOrigin != null && lockSettings != null
+                    && lockSettings.isSecureSpaceFingerprintOriginCurrent(mSecureSpaceOrigin);
+            var identifiedDestination = concealed && needsOwnership && identifier != null
+                    && currentIdentificationOrigin
+                    ? SecureSpaceFingerprintPool.resolveIdentification(getContext(), getSensorId(),
+                            identifier.getBiometricId(), original, getTargetUserId())
+                    : null;
+            var destination = identifiedDestination == null && needsOwnership && identifier != null
                     ? SecureSpaceFingerprintPool.resolve(getContext(), getSensorId(),
                             identifier.getBiometricId(), original, getTargetUserId(), concealed)
                     : null;
-            if (needsOwnership && destination == null) {
+            if (identifiedDestination != null) {
+                if (!lockSettings.isSecureSpaceFingerprintOriginCurrent(mSecureSpaceOrigin)) {
+                    Slog.w(TAG, "Secure fingerprint identification origin became stale");
+                    authenticated = false;
+                    token = null;
+                    rejectedSuccessfulMatch = true;
+                } else {
+                    var power = getContext().getSystemService(PowerManager.class);
+                    if (!power.isInteractive()) {
+                        power.wakeUp(SystemClock.uptimeMillis(), PowerManager.WAKE_REASON_BIOMETRIC,
+                                "android:SECURE_SPACE_FINGERPRINT_IDENTIFY");
+                    }
+                    try {
+                        getListener().onSecureSpaceIdentificationSucceeded(
+                                getSensorId(), identifier.getBiometricId(),
+                                mSecureSpaceOrigin.userId(), mSecureSpaceOrigin.serialNumber(),
+                                mSecureSpaceOrigin.foregroundGeneration(),
+                                mSecureSpaceOrigin.sessionEpoch(), mSecureSpaceOrigin.protectorId(),
+                                identifiedDestination.userId(), identifiedDestination.serialNumber(),
+                                identifiedDestination.secureUserId(),
+                                identifiedDestination.protectorId());
+                        Slog.i(TAG, "Secure Space fingerprint identified locked destination user="
+                                + identifiedDestination.userId());
+                    } catch (RemoteException | RuntimeException error) {
+                        Slog.w(TAG, "Secure fingerprint identification delivery failed");
+                        onError(BiometricFingerprintConstants.FINGERPRINT_ERROR_CANCELED, 0);
+                        return;
+                    }
+                    // Identification chooses which user should become foreground. It is explicitly
+                    // not authentication: no HAT is recorded, no trust is granted, and CE remains
+                    // locked until the destination's normal PIN/password bouncer succeeds.
+                    mState = STATE_STOPPED;
+                    mSensorOverlays.hide(getSensorId());
+                    mAuthenticationStateListeners.onAuthenticationStopped(
+                            new AuthenticationStoppedInfo.Builder(BiometricSourceType.FINGERPRINT,
+                                    getRequestReason()).build());
+                    // Finish the HAL operation, but do not tell AuthSessionCoordinator that this was
+                    // a successful biometric authentication. The match authorized identity selection
+                    // only; the destination still owes its primary credential.
+                    mCallback.onClientFinished(this, false);
+                    return;
+                }
+            } else if (needsOwnership && destination == null) {
                 Slog.w(TAG, "Secure Space fingerprint ownership rejected");
                 authenticated = false;
                 token = null;

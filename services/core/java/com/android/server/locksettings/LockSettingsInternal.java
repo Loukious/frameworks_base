@@ -38,6 +38,8 @@ public abstract class LockSettingsInternal {
     public SecureSpaceFingerprintIdentity getSecureSpaceFingerprintIdentity(int userId) {
         return null;
     }
+    public boolean isSecureSpaceFingerprintIdentityCurrent(
+            SecureSpaceFingerprintIdentity identity) { return false; }
     public boolean isSecureSpaceFingerprintBindingCurrent(int sensorId, int fingerId,
             SecureSpaceFingerprintIdentity identity) { return false; }
     public boolean recordSecureSpaceFingerprintEnrollment(int sensorId, int fingerId,
@@ -46,6 +48,8 @@ public abstract class LockSettingsInternal {
     public record SecureSpaceFingerprintOrigin(int userId, int serialNumber,
             long foregroundGeneration, long sessionEpoch, long protectorId) {}
     public SecureSpaceFingerprintOrigin captureSecureSpaceFingerprintOrigin(int userId) { return null; }
+    public boolean isSecureSpaceFingerprintOriginCurrent(
+            SecureSpaceFingerprintOrigin originSnapshot) { return false; }
 
     public android.os.IBinder issueSecureSpaceFingerprintHandoff(
             SecureSpaceFingerprintIdentity destination, SecureSpaceFingerprintOrigin originSnapshot,

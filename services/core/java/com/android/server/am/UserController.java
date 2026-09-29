@@ -2522,12 +2522,36 @@ class UserController implements Handler.Callback {
     }
 
     boolean switchUser(final int targetUserId) {
+        return switchUserInternal(UserHandle.USER_NULL, targetUserId, true /* queueIfBusy */);
+    }
+
+    /**
+     * Starts a switch only while the expected origin is still current and no other switch exists.
+     * This is deliberately non-queuing so a security-sensitive authorization cannot be replayed
+     * after an unrelated foreground-user transition completes.
+     */
+    boolean switchUserIfCurrent(final int expectedCurrentUserId, final int targetUserId) {
+        if (expectedCurrentUserId == UserHandle.USER_NULL) return false;
+        return switchUserInternal(expectedCurrentUserId, targetUserId, false /* queueIfBusy */);
+    }
+
+    private boolean switchUserInternal(final int expectedCurrentUserId, final int targetUserId,
+            boolean queueIfBusy) {
         enforceShellRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, targetUserId);
         EventLog.writeEvent(EventLogTags.UC_SWITCH_USER, targetUserId);
-        int currentUserId = getCurrentUserId();
         UserInfo targetUserInfo = getUserInfo(targetUserId);
         boolean userSwitchUiEnabled;
+        final int currentUserId;
         synchronized (mLock) {
+            currentUserId = mCurrentUserId;
+            if (expectedCurrentUserId != UserHandle.USER_NULL
+                    && (currentUserId != expectedCurrentUserId
+                            || mTargetUserId != UserHandle.USER_NULL)) {
+                Slogf.w(TAG, "Conditional user switch rejected: expected current User #"
+                        + expectedCurrentUserId + ", actual current User #" + currentUserId
+                        + ", target User #" + mTargetUserId);
+                return false;
+            }
             if (targetUserId == currentUserId && mTargetUserId == UserHandle.USER_NULL) {
                 Slogf.i(TAG, "user #" + targetUserId + " is already the current user");
                 mHandler.post(this::endUserSwitch);
@@ -2553,6 +2577,11 @@ class UserController implements Handler.Callback {
                 return false;
             }
             if (mTargetUserId != UserHandle.USER_NULL) {
+                if (!queueIfBusy) {
+                    Slogf.w(TAG, "Conditional user switch rejected: switch to User #"
+                            + mTargetUserId + " already in progress");
+                    return false;
+                }
                 Slogf.w(TAG, "There is already an ongoing user switch to User #" + mTargetUserId
                         + ". User #" + targetUserId + " will be added to the queue.");
                 mPendingTargetUserIds.offer(targetUserId);

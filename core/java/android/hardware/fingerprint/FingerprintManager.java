@@ -406,6 +406,13 @@ public class FingerprintManager implements BiometricAuthenticator, BiometricFing
                 int originSerial, int destinationUserId, int destinationSerial,
                 boolean strongBiometric) {}
 
+        /** @hide Identifies a locked Secure Space; the destination still requires primary auth. */
+        public void onSecureSpaceIdentificationSucceeded(int sensorId, int fingerId,
+                int originUserId, int originSerial, long originForegroundGeneration,
+                long originSessionEpoch, long originProtectorId, int destinationUserId,
+                int destinationSerial, long destinationSecureUserId,
+                long destinationProtectorId) {}
+
 
         /**
          * Called when a fingerprint is valid but not recognized.
@@ -1622,6 +1629,18 @@ public class FingerprintManager implements BiometricAuthenticator, BiometricFing
         }
 
         @Override
+        public void onSecureSpaceIdentificationSucceeded(int sensorId, int fingerId,
+                int originUserId, int originSerial, long originForegroundGeneration,
+                long originSessionEpoch, long originProtectorId, int destinationUserId,
+                int destinationSerial, long destinationSecureUserId,
+                long destinationProtectorId) {
+            mExecutor.execute(() -> mFingerprintCallback.sendSecureSpaceIdentificationSucceeded(
+                    sensorId, fingerId, originUserId, originSerial, originForegroundGeneration,
+                    originSessionEpoch, originProtectorId, destinationUserId, destinationSerial,
+                    destinationSecureUserId, destinationProtectorId));
+        }
+
+        @Override
         public void onFingerprintDetected(int sensorId, int userId, boolean isStrongBiometric) {
             mExecutor.execute(() -> mFingerprintCallback.sendFingerprintDetected(sensorId, userId,
                     isStrongBiometric));
@@ -1669,6 +1688,39 @@ public class FingerprintManager implements BiometricAuthenticator, BiometricFing
         if (mService == null) return false;
         try {
             return mService.hasSecureSpaceRoutingCandidate(mContext.getOpPackageName());
+        } catch (RemoteException | RuntimeException error) {
+            return false;
+        }
+    }
+
+    /** @hide */
+    public boolean isSecureSpaceIdentificationCurrent(int sensorId, int fingerId,
+            int originUserId, int originSerial, long originForegroundGeneration,
+            long originSessionEpoch, long originProtectorId, int destinationUserId,
+            int destinationSerial, long destinationSecureUserId, long destinationProtectorId) {
+        if (mService == null) return false;
+        try {
+            return mService.isSecureSpaceIdentificationCurrent(mContext.getOpPackageName(),
+                    sensorId, fingerId, originUserId, originSerial, originForegroundGeneration,
+                    originSessionEpoch, originProtectorId, destinationUserId, destinationSerial,
+                    destinationSecureUserId, destinationProtectorId);
+        } catch (RemoteException | RuntimeException error) {
+            return false;
+        }
+    }
+
+    /** @hide */
+    public boolean switchSecureSpaceIdentification(int sensorId, int fingerId,
+            int originUserId, int originSerial, long originForegroundGeneration,
+            long originSessionEpoch, long originProtectorId, int destinationUserId,
+            int destinationSerial, long destinationSecureUserId, long destinationProtectorId,
+            com.android.internal.widget.ISecureSpaceCredentialAttempt witness) {
+        if (mService == null) return false;
+        try {
+            return mService.switchSecureSpaceIdentification(mContext.getOpPackageName(),
+                    sensorId, fingerId, originUserId, originSerial, originForegroundGeneration,
+                    originSessionEpoch, originProtectorId, destinationUserId, destinationSerial,
+                    destinationSecureUserId, destinationProtectorId, witness);
         } catch (RemoteException | RuntimeException error) {
             return false;
         }

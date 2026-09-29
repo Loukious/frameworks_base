@@ -31,6 +31,7 @@ import static android.hardware.fingerprint.FingerprintSensorConfigurations.getIF
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.ActivityManager;
+import android.app.ActivityManagerInternal;
 import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -82,6 +83,7 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.DumpUtils;
 import com.android.internal.widget.LockPatternUtils;
+import com.android.server.LocalServices;
 import com.android.server.SystemService;
 import com.android.server.biometrics.Utils;
 import com.android.server.biometrics.log.BiometricContext;
@@ -273,6 +275,60 @@ public class FingerprintService extends SystemService {
             final long identity = Binder.clearCallingIdentity();
             try {
                 return hasSecureSpaceRoutingCandidateInternal();
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public boolean isSecureSpaceIdentificationCurrent(String packageName, int sensorId,
+                int fingerId, int originUserId, int originSerial,
+                long originForegroundGeneration, long originSessionEpoch, long originProtectorId,
+                int destinationUserId, int destinationSerial, long destinationSecureUserId,
+                long destinationProtectorId) {
+            mAppOps.checkPackage(Binder.getCallingUid(), packageName);
+            if (!Utils.isKeyguard(getContext(), packageName)) {
+                throw new SecurityException("Fingerprint identification freshness is keyguard-only");
+            }
+            final long identity = Binder.clearCallingIdentity();
+            try {
+                return SecureSpaceFingerprintPool.isIdentificationSwitchEligible(getContext(),
+                        sensorId, fingerId, originUserId, originSerial, originForegroundGeneration,
+                        originSessionEpoch, originProtectorId, destinationUserId, destinationSerial,
+                        destinationSecureUserId, destinationProtectorId);
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public boolean switchSecureSpaceIdentification(String packageName, int sensorId,
+                int fingerId, int originUserId, int originSerial,
+                long originForegroundGeneration, long originSessionEpoch, long originProtectorId,
+                int destinationUserId, int destinationSerial, long destinationSecureUserId,
+                long destinationProtectorId,
+                com.android.internal.widget.ISecureSpaceCredentialAttempt witness) {
+            mAppOps.checkPackage(Binder.getCallingUid(), packageName);
+            if (!Utils.isKeyguard(getContext(), packageName)) {
+                throw new SecurityException("Fingerprint identification switch is keyguard-only");
+            }
+            final long identity = Binder.clearCallingIdentity();
+            try {
+                if (witness == null || !witness.isActive()) return false;
+                if (!SecureSpaceFingerprintPool.isIdentificationSwitchEligible(getContext(),
+                        sensorId, fingerId, originUserId, originSerial,
+                        originForegroundGeneration, originSessionEpoch, originProtectorId,
+                        destinationUserId, destinationSerial, destinationSecureUserId,
+                        destinationProtectorId)) {
+                    return false;
+                }
+                if (!witness.isActive()) return false;
+                ActivityManagerInternal am = LocalServices.getService(ActivityManagerInternal.class);
+                return am != null && am.switchUserIfCurrent(originUserId, destinationUserId);
+            } catch (RemoteException error) {
+                return false;
             } finally {
                 Binder.restoreCallingIdentity(identity);
             }

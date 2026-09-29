@@ -361,6 +361,14 @@ public abstract class ActivityManagerInternal {
      */
     public abstract Pair<Integer, Integer> getCurrentAndTargetUserIds();
 
+    /**
+     * Switches to {@code targetUserId} only if {@code expectedCurrentUserId} is still current and
+     * no other user switch is pending. Unlike the public switch API, this never queues behind an
+     * in-progress switch.
+     */
+    public abstract boolean switchUserIfCurrent(@UserIdInt int expectedCurrentUserId,
+            @UserIdInt int targetUserId);
+
     /** Returns the current user id. */
     public abstract int getCurrentUserId();
 

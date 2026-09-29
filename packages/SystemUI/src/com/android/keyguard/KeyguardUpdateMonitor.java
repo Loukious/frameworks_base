@@ -1998,6 +1998,50 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener, CoreSt
                         });
                 setFingerprintRunningState(BIOMETRIC_STATE_STOPPED);
             }
+            @Override public void onSecureSpaceIdentificationSucceeded(int sensorId, int fingerId,
+                    int origin, int originSerial, long originForegroundGeneration,
+                    long originSessionEpoch, long originProtectorId, int destination,
+                    int destinationSerial, long destinationSecureUserId,
+                    long destinationProtectorId) {
+                // A stale callback belongs to an older scan; do not clear a newer scan's state.
+                if (!current()) {
+                    return;
+                }
+                mFingerprintCancelSignal = null;
+                mHandler.removeCallbacks(mFpCancelNotReceived);
+                if (mSecureSpaceEntry == null || !mKeyguardShowing || mKeyguardGoingAway) {
+                    setFingerprintRunningState(BIOMETRIC_STATE_STOPPED);
+                    return;
+                }
+                boolean switchAccepted = mSecureSpaceEntry.acceptFingerprintIdentification(
+                        origin, originSerial, destination, destinationSerial,
+                        new com.android.systemui.securespaces.SecureSpaceEntryCoordinator.Callback() {
+                            @Override public boolean isActive() {
+                                return current() && mKeyguardShowing && !mKeyguardGoingAway;
+                            }
+                            @Override public boolean isIdentificationCurrent() {
+                                return mFpm != null && mFpm.isSecureSpaceIdentificationCurrent(
+                                        sensorId, fingerId, origin, originSerial,
+                                        originForegroundGeneration, originSessionEpoch,
+                                        originProtectorId, destination, destinationSerial,
+                                        destinationSecureUserId, destinationProtectorId);
+                            }
+                            @Override public boolean switchIdentification(
+                                    com.android.internal.widget.ISecureSpaceCredentialAttempt witness) {
+                                return mFpm != null && mFpm.switchSecureSpaceIdentification(
+                                        sensorId, fingerId, origin, originSerial,
+                                        originForegroundGeneration, originSessionEpoch,
+                                        originProtectorId, destination, destinationSerial,
+                                        destinationSecureUserId, destinationProtectorId, witness);
+                            }
+                            @Override public void onRejected(
+                                    com.android.internal.widget.SecureSpaceCredentialResponse ignored) {
+                                updateFingerprintListeningState(BIOMETRIC_ACTION_UPDATE);
+                            }
+                        });
+                setFingerprintRunningState(BIOMETRIC_STATE_STOPPED);
+                if (!switchAccepted) updateFingerprintListeningState(BIOMETRIC_ACTION_UPDATE);
+            }
         };
     }
 

@@ -46,6 +46,8 @@ public class SecureSpaceEntryCoordinatorTest {
     private SecureSpaceEntryCoordinator mCoordinator;
     private PowerManager mPower;
     private UserManager mUsers;
+    private UserTracker mUserTracker;
+    private SelectedUserInteractor mSelectedUser;
     private SecureSpaceEntryCoordinator.Host mHost;
     private IBinder mToken;
     private ISecureSpaceCredentialAttempt mWitness;
@@ -62,10 +64,10 @@ public class SecureSpaceEntryCoordinatorTest {
         owner.serialNumber = 1;
         when(mUsers.getUserInfo(0)).thenReturn(owner);
         when(mUsers.isUserUnlocked(any(android.os.UserHandle.class))).thenReturn(true);
-        UserTracker tracker = mock(UserTracker.class);
-        when(tracker.getUserId()).thenReturn(0);
-        SelectedUserInteractor selected = mock(SelectedUserInteractor.class);
-        when(selected.getSelectedUserId()).thenReturn(0);
+        mUserTracker = mock(UserTracker.class);
+        when(mUserTracker.getUserId()).thenReturn(0);
+        mSelectedUser = mock(SelectedUserInteractor.class);
+        when(mSelectedUser.getSelectedUserId()).thenReturn(0);
         DelayableExecutor main = new DelayableExecutor() {
             public void execute(Runnable runnable) { mMain.add(runnable); }
             public Runnable executeDelayed(Runnable runnable, long delay, TimeUnit unit) {
@@ -76,8 +78,8 @@ public class SecureSpaceEntryCoordinatorTest {
                 throw new AssertionError("Unexpected timer");
             }
         };
-        mCoordinator = new SecureSpaceEntryCoordinator(mBackend, mUsers, mPower, tracker,
-                selected, mBackground::add, main, mock(WakefulnessLifecycle.class));
+        mCoordinator = new SecureSpaceEntryCoordinator(mBackend, mUsers, mPower, mUserTracker,
+                mSelectedUser, mBackground::add, main, mock(WakefulnessLifecycle.class));
         mHost = mock(SecureSpaceEntryCoordinator.Host.class);
         when(mHost.isReady(0, 1)).thenReturn(true);
         mCoordinator.registerHost(mHost);
@@ -379,6 +381,161 @@ public class SecureSpaceEntryCoordinatorTest {
         when(mUsers.getUserInfo(10)).thenReturn(other);
     }
 
+    private void addIdentificationAlternative() {
+        addAlternative();
+        when(mBackend.credentialType(0)).thenReturn(
+                com.android.internal.widget.LockPatternUtils.CREDENTIAL_TYPE_PIN);
+    }
+
+    @Test
+    public void fingerprintIdentification_switchesButNeverAuthenticates() throws Exception {
+        addIdentificationAlternative();
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isTrue();
+
+        assertThat(mCoordinator.isSwitchInProgress()).isTrue();
+        assertThat(mCoordinator.isAuthorizedSwitchTo(10)).isTrue();
+        drain();
+        assertThat(mCallback.identificationSwitches).isEqualTo(1);
+        verify(mBackend, never()).switchUser(anyInt());
+        verify(mBackend, never()).prepare(any());
+        verify(mBackend, never()).attachFingerprint(any(), anyInt(), anyInt(), anyInt(),
+                anyInt(), any());
+        verify(mBackend, never()).consumeFingerprint(any(), anyInt(), anyInt());
+        verify(mBackend, never()).consume(any(), anyInt(), anyInt());
+        verify(mHost, never()).completeBiometricAuthentication(anyInt(), anyInt(),
+                org.mockito.ArgumentMatchers.anyBoolean());
+        verify(mHost, never()).completePrimaryAuthentication(anyInt(), anyInt());
+        assertThat(mCallback.accepted).isEqualTo(1);
+    }
+
+    @Test
+    public void fingerprintIdentification_lockedOriginCannotSwitch() throws Exception {
+        addIdentificationAlternative();
+        when(mUsers.isUserUnlocked(android.os.UserHandle.of(0))).thenReturn(false);
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isFalse();
+        drain();
+
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCoordinator.isSwitchInProgress()).isFalse();
+    }
+
+    @Test
+    public void fingerprintIdentification_staleServerAuthorizationRejectsAndRestartsSource()
+            throws Exception {
+        addIdentificationAlternative();
+        mCallback.identificationCurrent = false;
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isTrue();
+        drain();
+
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCallback.identificationSwitches).isEqualTo(0);
+        assertThat(mCallback.accepted).isEqualTo(1);
+        assertThat(mCallback.rejected).isEqualTo(1);
+        assertThat(mCoordinator.isSwitchInProgress()).isFalse();
+    }
+
+    @Test
+    public void fingerprintIdentification_missingServerAuthorizationFailsClosed() throws Exception {
+        addIdentificationAlternative();
+        SecureSpaceEntryCoordinator.Callback callback =
+                new SecureSpaceEntryCoordinator.Callback() {
+                    @Override
+                    public boolean isActive() {
+                        return true;
+                    }
+
+                    @Override
+                    public void onRejected(SecureSpaceCredentialResponse response) {}
+                };
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, callback)).isTrue();
+        drain();
+
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCoordinator.isSwitchInProgress()).isFalse();
+    }
+
+    @Test
+    public void fingerprintIdentification_userSwitchStartsBeforeBackgroundWork_doesNotQueue()
+            throws Exception {
+        addIdentificationAlternative();
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isTrue();
+        when(mUserTracker.isUserSwitching()).thenReturn(true);
+        drain();
+
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCallback.identificationSwitches).isEqualTo(0);
+        assertThat(mCallback.rejected).isEqualTo(1);
+    }
+
+    @Test
+    public void fingerprintIdentification_cancelDuringServerCheck_doesNotSwitch() throws Exception {
+        addIdentificationAlternative();
+        mCallback.onIdentificationCheck = mCoordinator::cancel;
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isTrue();
+        drain();
+
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCallback.identificationSwitches).isEqualTo(0);
+        assertThat(mCoordinator.isSwitchInProgress()).isFalse();
+    }
+
+    @Test
+    public void fingerprintIdentification_userSwitchStartsDuringServerCheck_doesNotQueue()
+            throws Exception {
+        addIdentificationAlternative();
+        mCallback.onIdentificationCheck =
+                () -> when(mUserTracker.isUserSwitching()).thenReturn(true);
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isTrue();
+        drain();
+
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCallback.identificationSwitches).isEqualTo(0);
+        assertThat(mCallback.rejected).isEqualTo(1);
+    }
+
+    @Test
+    public void fingerprintIdentification_atomicServerSwitchRefusalDoesNotQueue() throws Exception {
+        addIdentificationAlternative();
+        mCallback.identificationSwitch = false;
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isTrue();
+        drain();
+
+        assertThat(mCallback.identificationSwitches).isEqualTo(1);
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCallback.rejected).isEqualTo(1);
+        assertThat(mCoordinator.isSwitchInProgress()).isFalse();
+    }
+
+    @Test
+    public void fingerprintIdentification_cancelDuringFinalSwitchRpcRevokesWitness()
+            throws Exception {
+        addIdentificationAlternative();
+        mCallback.onIdentificationSwitch = mCoordinator::cancel;
+
+        assertThat(mCoordinator.acceptFingerprintIdentification(0, 1, 10, 2, mCallback))
+                .isTrue();
+        drain();
+
+        assertThat(mCallback.identificationSwitches).isEqualTo(1);
+        verify(mBackend, never()).switchUser(anyInt());
+        assertThat(mCoordinator.isSwitchInProgress()).isFalse();
+    }
+
     @Test
     public void completedUnionRejection_reportsInactivePolicyOnce() {
         addAlternative();
@@ -470,7 +627,25 @@ public class SecureSpaceEntryCoordinatorTest {
 
     private static class Callback implements SecureSpaceEntryCoordinator.Callback {
         boolean active = true;
+        boolean identificationCurrent = true;
+        boolean identificationSwitch = true;
+        Runnable onIdentificationCheck;
+        Runnable onIdentificationSwitch;
+        int identificationSwitches;
         public boolean isActive() { return active; }
+        public boolean isIdentificationCurrent() {
+            if (onIdentificationCheck != null) onIdentificationCheck.run();
+            return identificationCurrent;
+        }
+        public boolean switchIdentification(ISecureSpaceCredentialAttempt witness) {
+            ++identificationSwitches;
+            if (onIdentificationSwitch != null) onIdentificationSwitch.run();
+            try {
+                return identificationSwitch && witness != null && witness.isActive();
+            } catch (android.os.RemoteException error) {
+                return false;
+            }
+        }
         int accepted;
         int rejected;
         public void onAccepted() { ++accepted; }

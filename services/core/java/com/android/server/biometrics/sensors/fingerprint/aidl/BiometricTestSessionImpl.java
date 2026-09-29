@@ -73,6 +73,14 @@ class BiometricTestSessionImpl extends ITestSession.Stub {
         }
 
         @Override
+        public void onSecureSpaceIdentificationSucceeded(int sensorId, int fingerId,
+                int originUserId, int originSerial, long originForegroundGeneration,
+                long originSessionEpoch, long originProtectorId, int destinationUserId,
+                int destinationSerial, long destinationSecureUserId, long destinationProtectorId) {
+            // Enrollment-only test receivers cannot route device entry.
+        }
+
+        @Override
         public void onEnrollResult(Fingerprint fp, int remaining) {
 
         }
