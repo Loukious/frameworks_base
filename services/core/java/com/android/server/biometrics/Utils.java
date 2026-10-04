@@ -526,6 +526,23 @@ public class Utils {
     }
 
     /**
+     * Resolves credential ownership as the system, without changing the identity used for the
+     * caller's biometric permission and app-ops checks. UserManager requires MANAGE_USERS for
+     * this query, which ordinary biometric clients do not hold.
+     */
+    public static boolean isSameCredentialOwner(@NonNull Context context, int callingUserId,
+            int targetUserId) {
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            final UserManager users = context.getSystemService(UserManager.class);
+            return users.getCredentialOwnerProfile(callingUserId)
+                    == users.getCredentialOwnerProfile(targetUserId);
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
+    /**
      * Checks if a client package matches Keyguard and can perform internal biometric operations.
      *
      * @param context The system context.

@@ -358,9 +358,7 @@ public class FingerprintService extends SystemService {
             final int userId = options.getUserId();
             final boolean isKeyguard = Utils.isKeyguard(getContext(), opPackageName);
             if (callingUid != Process.SYSTEM_UID && !isKeyguard) {
-                android.os.UserManager users = getContext().getSystemService(android.os.UserManager.class);
-                if (users.getCredentialOwnerProfile(callingUserId)
-                        != users.getCredentialOwnerProfile(userId)) {
+                if (!Utils.isSameCredentialOwner(getContext(), callingUserId, userId)) {
                     throw new SecurityException("App fingerprint authentication is scoped to its credential owner");
                 }
             }

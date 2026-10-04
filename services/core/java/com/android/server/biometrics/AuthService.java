@@ -304,9 +304,8 @@ public class AuthService extends SystemService {
             int caller = android.os.Binder.getCallingUid();
             if (caller != android.os.Process.SYSTEM_UID
                     && !Utils.isKeyguard(getContext(), opPackageName)) {
-                android.os.UserManager users = getContext().getSystemService(android.os.UserManager.class);
-                if (users.getCredentialOwnerProfile(android.os.UserHandle.getUserId(caller))
-                        != users.getCredentialOwnerProfile(userId)) {
+                if (!Utils.isSameCredentialOwner(getContext(), UserHandle.getUserId(caller),
+                        userId)) {
                     throw new SecurityException("App biometric authentication is scoped to its credential owner");
                 }
             }
