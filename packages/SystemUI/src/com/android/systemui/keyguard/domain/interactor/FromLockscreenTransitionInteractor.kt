@@ -18,7 +18,6 @@ package com.android.systemui.keyguard.domain.interactor
 
 import android.animation.ValueAnimator
 import android.util.MathUtils
-import android.util.Log
 import com.android.app.animation.Interpolators
 import com.android.app.tracing.coroutines.launchTraced as launch
 import com.android.systemui.bouncer.domain.interactor.PrimaryBouncerInteractor
@@ -66,7 +65,7 @@ constructor(
     @Background private val scope: CoroutineScope,
     @Application private val applicationScope: CoroutineScope,
     @Background bgDispatcher: CoroutineDispatcher,
-    @Main private val uiDispatcher: CoroutineDispatcher,
+    @Main mainDispatcher: CoroutineDispatcher,
     keyguardInteractor: KeyguardInteractor,
     private val shadeRepository: ShadeRepository,
     powerInteractor: PowerInteractor,
@@ -79,7 +78,7 @@ constructor(
     TransitionInteractor(
         fromState = KeyguardState.LOCKSCREEN,
         transitionInteractor = transitionInteractor,
-        mainDispatcher = uiDispatcher,
+        mainDispatcher = mainDispatcher,
         bgDispatcher = bgDispatcher,
         powerInteractor = powerInteractor,
         keyguardOcclusionInteractor = keyguardOcclusionInteractor,
@@ -187,9 +186,7 @@ constructor(
                             it.transitionState == TransitionState.RUNNING)
                 }
                 .collect {
-                    withContext(uiDispatcher) {
-                        updateLegacyPrimaryBouncer(KeyguardBouncerConstants.EXPANSION_VISIBLE)
-                    }
+                    withContext(mainDispatcher) { updateLegacyPrimaryBouncer() }
                 }
         }
         applicationScope.launch("$TAG#listenForLockscreenToPrimaryBouncerDragging") {
@@ -204,7 +201,7 @@ constructor(
                     internalTransitionInteractor.currentTransitionInfoInternal()
                 if (id != null) {
                     if (startedStep.to == KeyguardState.PRIMARY_BOUNCER) {
-                        updateLegacyPrimaryBouncer(shadeExpansion)
+                        updateLegacyPrimaryBouncer()
                         // An existing `id` means a transition is started, and calls to
                         // `updateTransition` will control it until FINISHED or CANCELED
                         var nextState =
@@ -275,7 +272,7 @@ constructor(
                                 ownerReason = "#listenForLockscreenToPrimaryBouncerDragging",
                             )
                         if (transitionId != null) {
-                            updateLegacyPrimaryBouncer(shadeExpansion)
+                            updateLegacyPrimaryBouncer()
                         }
                     }
                 }
@@ -301,17 +298,29 @@ constructor(
      * can recreate the lockscreen with the transition state ready while the legacy bouncer is
      * still hidden; advancing only the transition then produces an invisible credential view.
      */
-    private fun updateLegacyPrimaryBouncer(shadeExpansion: Float) {
-        Log.i(
-            TAG,
-            "legacy bouncer bridge expansion=$shadeExpansion showing=" +
-                primaryBouncerInteractor.isShowing.value + " showingSoon=" +
-                primaryBouncerInteractor.isShowingSoon.value,
-        )
+    private fun updateLegacyPrimaryBouncer() {
+        // A STARTED/RUNNING event may have waited for the main thread while the swipe was
+        // canceled or another transition took over. Reconcile the current manual transition,
+        // never the queued event. Animated bouncer shows have their own expansion/scrim owner.
+        val transitionInfo = internalTransitionInteractor.currentTransitionInfoInternal()
+        if (
+            transitionInfo.from != KeyguardState.LOCKSCREEN ||
+                transitionInfo.to != KeyguardState.PRIMARY_BOUNCER ||
+                transitionInfo.animator != null
+        ) {
+            return
+        }
+
+        // Sample after the thread hop (or suspended startTransitionTo), so a returning swipe
+        // stays in sync with the shade instead of being forced fully open by an old event.
+        val shadeExpansion = shadeRepository.legacyShadeExpansion.value
         // showingSoon is only a pending callback; after a biometric dismissal it can remain set
         // while the actual legacy container is invisible. Retry show() based on the real visible
-        // state so the transition cannot finish with an invisible PIN view.
-        if (!primaryBouncerInteractor.isShowing.value) {
+        // state, but never enqueue another show at the canceled swipe's hidden endpoint.
+        if (
+            shadeExpansion != KeyguardBouncerConstants.EXPANSION_HIDDEN &&
+                !primaryBouncerInteractor.isShowing.value
+        ) {
             primaryBouncerInteractor.show(
                 isScrimmed = false,
                 reason = "$TAG#listenForLockscreenToPrimaryBouncerDragging",
