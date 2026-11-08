@@ -50,7 +50,9 @@ class BackgroundBlurAlphaSync(
             alpha *= v.alpha * v.transitionAlpha
             v = v.parent as? View
         }
-        val blurAlpha = (255 * alpha.coerceIn(0f, 1f)).roundToInt()
+        // A transient invalid view alpha must not crash SystemUI during pre-draw. Hide the
+        // blur for this frame; the next valid frame recomputes it from the view hierarchy.
+        val blurAlpha = if (alpha.isFinite()) (255 * alpha.coerceIn(0f, 1f)).roundToInt() else 0
         if (blur.alpha != blurAlpha) {
             blur.alpha = blurAlpha
         }

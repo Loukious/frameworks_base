@@ -61,6 +61,43 @@ import java.util.List;
 public class QuickSettingsControllerImplTest extends QuickSettingsControllerImplBaseTest {
 
     @Test
+    public void computeExpansionFraction_beforeLayout_isCollapsed() {
+        assertThat(mQsController.computeExpansionFraction()).isEqualTo(0f);
+    }
+
+    @Test
+    public void updateExpansion_zeroHeight_doesNotPublishNaN() {
+        mQsController.setQs(mQs);
+        mQsController.updateExpansion();
+
+        assertThat(mShadeRepository.getQsExpansion().getValue()).isEqualTo(0f);
+        verify(mMediaHierarchyManager).setQsExpansion(0f);
+        verify(mNotificationShadeDepthController).setQsPanelExpansion(0f);
+    }
+
+    @Test
+    public void computeExpansionFraction_equalNonzeroHeights_isCollapsed() {
+        mQsController.setQs(mQs);
+        when(mQs.getQsMinExpansionHeight()).thenReturn(DEFAULT_HEIGHT);
+        when(mQs.getDesiredHeight()).thenReturn(DEFAULT_HEIGHT);
+        mQsController.updateMinHeight();
+        mQsController.onHeightChanged();
+
+        assertThat(mQsController.computeExpansionFraction()).isEqualTo(0f);
+    }
+
+    @Test
+    public void computeExpansionFraction_layoutAfterZeroHeight_recovers() {
+        mQsController.setQs(mQs);
+        mQsController.updateExpansion();
+        setDefaultHeightProperties();
+        mQsController.setExpansionHeight((DEFAULT_MIN_HEIGHT + DEFAULT_HEIGHT) / 2f);
+
+        assertThat(mQsController.computeExpansionFraction()).isEqualTo(0.5f);
+        assertThat(mShadeRepository.getQsExpansion().getValue()).isEqualTo(0.5f);
+    }
+
+    @Test
     public void testCloseQsSideEffects() {
         enableSplitShade(true);
         mQsController.setExpandImmediate(true);

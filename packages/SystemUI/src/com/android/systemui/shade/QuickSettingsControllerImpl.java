@@ -1190,9 +1190,13 @@ public class QuickSettingsControllerImpl implements QuickSettingsController, Dum
             // be larger than 0 because of the timing, leading to flickers.
             return 0.0f;
         }
-        return Math.min(
-                1f, (mExpansionHeight - mMinExpansionHeight) / (mMaxExpansionHeight
-                        - mMinExpansionHeight));
+        final float expansionRange = mMaxExpansionHeight - mMinExpansionHeight;
+        if (expansionRange <= 0f) {
+            // The fragment publishes expansion before its first layout, and its heights can
+            // temporarily coincide while it is recreated. No expandable range means collapsed.
+            return 0f;
+        }
+        return MathUtils.saturate((mExpansionHeight - mMinExpansionHeight) / expansionRange);
     }
 
     void updateMinHeight() {
