@@ -200,7 +200,10 @@ constructor(
 
     private val initialBouncerMessage: Flow<BouncerMessageModel> =
         combine(
-                primaryBouncerInteractor.lastShownSecurityMode, // required to update defaultMessage
+                combine(
+                    primaryBouncerInteractor.lastShownSecurityMode,
+                    userRepository.selectedUserInfo,
+                ) { _, userInfo -> userInfo.id },
                 authenticationFlags,
                 trustRepository.isCurrentUserTrustManaged,
                 isAnyBiometricsEnabledAndEnrolled,
@@ -213,7 +216,7 @@ constructor(
             )
             .map {
                 (
-                    _,
+                    userId,
                     flags,
                     _,
                     biometricsEnrolledAndEnabled,
@@ -222,6 +225,15 @@ constructor(
                     isFingerprintAuthCurrentlyAllowedOnBouncer,
                     isFaceAuthCurrentlyAllowedOnBouncer,
                     enrolledStrongBiometricModalities) ->
+                // User selection and StrongAuthTracker updates arrive independently. Never
+                // describe another user's boot/lockout state while waiting for matching flags.
+                if (userId != currentUserId || flags.userId != userId) {
+                    return@map BouncerMessageStrings.defaultMessage(
+                            currentSecurityMode.toAuthModel(),
+                            fpAuthIsAllowed = false,
+                        )
+                        .toMessage()
+                }
                 val isTrustUsuallyManaged = trustRepository.isCurrentUserTrustUsuallyManaged.value
                 val trustOrBiometricsAvailable =
                     (isTrustUsuallyManaged || biometricsEnrolledAndEnabled)
@@ -267,6 +279,11 @@ constructor(
                     BouncerMessageStrings.authRequiredAfterAdminLockdown(
                             currentSecurityMode.toAuthModel()
                         )
+                        .toMessage()
+                } else if (trustOrBiometricsAvailable && flags.isPrimaryAuthRequiredAfterLockout) {
+                    // Credential lockout can require primary auth even after the sensor's
+                    // lockout has expired, or when SystemUI has just restarted.
+                    BouncerMessageStrings.class3AuthLockedOut(currentSecurityMode.toAuthModel())
                         .toMessage()
                 } else if (
                     trustOrBiometricsAvailable && flags.isPrimaryAuthRequiredForUnattendedUpdate

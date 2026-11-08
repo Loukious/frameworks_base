@@ -830,6 +830,9 @@ class BouncerMessageInteractorTest : SysuiTestCase() {
                 .startTimer(eq(3000L), eq(1000L), countDownTimerCallback.capture())
 
             kosmos.fakeUserRepository.setSelectedUserInfo(SECONDARY_USER)
+            biometricSettingsRepository.setAuthenticationFlags(
+                AuthenticationFlags(SECONDARY_USER_ID, 0)
+            )
             runCurrent()
 
             verify(countDownTimerUtil).cancelTimer()
@@ -964,6 +967,78 @@ class BouncerMessageInteractorTest : SysuiTestCase() {
 
             assertThat(primaryResMessage(lockoutMessage)).isEqualTo(fpOrCredString)
             assertThat(lockoutMessage?.secondaryMessage?.message).isNull()
+        }
+
+    @Test
+    fun credentialLockout_withoutSensorLockout_explainsPrimaryAuthRequirement() =
+        testScope.runTest {
+            init(fingerprintAuthCurrentlyAllowed = false)
+            val message by collectLastValue(underTest.bouncerMessage)
+            biometricSettingsRepository.setAuthenticationFlags(
+                AuthenticationFlags(
+                    PRIMARY_USER_ID,
+                    LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_LOCKOUT,
+                )
+            )
+            runCurrent()
+
+            assertThat(primaryResMessage(message)).isEqualTo(enterCredString)
+            assertThat(secondaryResMessage(message)).isEqualTo(tooManyAttemptsString)
+
+            biometricSettingsRepository.setAuthenticationFlags(
+                AuthenticationFlags(PRIMARY_USER_ID, 0)
+            )
+            runCurrent()
+            assertThat(message?.secondaryMessage?.messageResId).isEqualTo(0)
+        }
+
+    @Test
+    fun userSwitch_doesNotReusePreviousUsersRestartMessage() =
+        testScope.runTest {
+            init(fingerprintAuthCurrentlyAllowed = false)
+            val message by collectLastValue(underTest.bouncerMessage)
+            biometricSettingsRepository.setAuthenticationFlags(
+                AuthenticationFlags(
+                    PRIMARY_USER_ID,
+                    LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_BOOT,
+                )
+            )
+            runCurrent()
+            assertThat(secondaryResMessage(message)).isEqualTo(afterRestartString)
+
+            // The selected user changes before StrongAuthTracker delivers their flags.
+            kosmos.fakeUserRepository.setSelectedUserInfo(SECONDARY_USER)
+            runCurrent()
+            assertThat(primaryResMessage(message)).isEqualTo(enterCredString)
+            assertThat(message?.secondaryMessage?.messageResId).isEqualTo(0)
+
+            biometricSettingsRepository.setAuthenticationFlags(
+                AuthenticationFlags(
+                    SECONDARY_USER_ID,
+                    LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_LOCKOUT,
+                )
+            )
+            runCurrent()
+            assertThat(secondaryResMessage(message)).isEqualTo(tooManyAttemptsString)
+        }
+
+    @Test
+    fun userSwitch_flagsArriveBeforeSelection_doesNotShowOtherUsersRestartReason() =
+        testScope.runTest {
+            init(fingerprintAuthCurrentlyAllowed = false)
+            val message by collectLastValue(underTest.bouncerMessage)
+            biometricSettingsRepository.setAuthenticationFlags(
+                AuthenticationFlags(
+                    SECONDARY_USER_ID,
+                    LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_BOOT,
+                )
+            )
+            runCurrent()
+            assertThat(message?.secondaryMessage?.messageResId).isEqualTo(0)
+
+            kosmos.fakeUserRepository.setSelectedUserInfo(SECONDARY_USER)
+            runCurrent()
+            assertThat(secondaryResMessage(message)).isEqualTo(afterRestartString)
         }
 
     @Test
@@ -1294,7 +1369,7 @@ class BouncerMessageInteractorTest : SysuiTestCase() {
             verifyMessagesForAuthFlag(
                 LockPatternUtils.StrongAuthTracker.STRONG_AUTH_NOT_REQUIRED to defaultMessage,
                 LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_LOCKOUT to
-                    defaultMessage,
+                    Pair(enterCredString, tooManyAttemptsString),
                 LockPatternUtils.StrongAuthTracker.SOME_AUTH_REQUIRED_AFTER_USER_REQUEST to
                     defaultMessage,
                 LockPatternUtils.StrongAuthTracker.SOME_AUTH_REQUIRED_AFTER_TRUSTAGENT_EXPIRED to
